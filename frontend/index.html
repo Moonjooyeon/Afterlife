@@ -19,6 +19,17 @@
     <h1 data-title>[배포물 이름]</h1>
     <p>두 사람 중 한 사람이 먼저 떠났습니다.<br>남은 사람은 그 뒤를 어떻게 살았을까요.</p>
   </header>
+  <section class="access hidden" id="access">
+    <div class="access-text">
+      <div class="access-title" id="auth-label">토스 로그인이 필요합니다</div>
+      <div class="access-sub" id="pass-label"></div>
+    </div>
+    <div class="access-actions">
+      <button type="button" id="btn-login">토스 로그인</button>
+      <button type="button" id="btn-buy">이용권 구매</button>
+      <button type="button" id="btn-logout" class="hidden">로그아웃</button>
+    </div>
+  </section>
   <div class="modes" role="group" aria-label="모드 선택">
     <button type="button" id="mode-pair" aria-pressed="true">두 사람의 이야기</button>
     <button type="button" id="mode-solo" aria-pressed="false">한 사람의 이야기</button>

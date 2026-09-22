@@ -6,6 +6,9 @@
    ============================================================ */
 const API_BASE_URL = String(envValue("VITE_API_BASE_URL")).replace(/\/+$/, "");
 const DEVICE_ID_STORAGE = "afterlife_device_id";
+const AUTH_TOKEN_STORAGE = "afterlife_auth_token";
+// 토스 콘솔에서 받은 상품 SKU. 비워두면 상품 목록에서 이용권 상품을 찾아 쓴다.
+const TOSS_IAP_SKU = String(envValue("VITE_TOSS_IAP_SKU")).trim();
 
 // Vite 빌드에서는 import.meta.env가 치환되고, 백엔드가 소스를 그대로 서빙할 때는 비어 있다.
 function envValue(key) {
@@ -29,14 +32,38 @@ function deviceId() {
   }
 }
 
+function savedToken() {
+  try { return localStorage.getItem(AUTH_TOKEN_STORAGE) || ""; } catch { return ""; }
+}
+function saveToken(token) {
+  AUTH_TOKEN = token || "";
+  try {
+    if (AUTH_TOKEN) localStorage.setItem(AUTH_TOKEN_STORAGE, AUTH_TOKEN);
+    else localStorage.removeItem(AUTH_TOKEN_STORAGE);
+  } catch {}
+}
+
 async function apiFetch(path, options = {}) {
-  const res = await fetch(apiPath(path), {
-    ...options,
-    headers: { "Content-Type": "application/json", "X-Device-Id": deviceId(), ...(options.headers || {}) },
-  });
+  const { token = AUTH_TOKEN, ...rest } = options;
+  const headers = { "Content-Type": "application/json", "X-Device-Id": deviceId(), ...(rest.headers || {}) };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(apiPath(path), { ...rest, headers });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `요청 실패 (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(data.error || `요청 실패 (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
   return data;
+}
+
+// 토스 SDK는 토스 인앱에서만 있다. 없으면 null을 돌려주고 기능만 끈다.
+let tossSdkPromise;
+function tossSdk() {
+  if (!tossSdkPromise) {
+    tossSdkPromise = import("@apps-in-toss/web-framework").catch(() => null);
+  }
+  return tossSdkPromise;
 }
 
 const makeChargeKey = () => `AL-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -45,8 +72,10 @@ const makeChargeKey = () => `AL-${Date.now().toString(36)}-${Math.random().toStr
 let AI_PICK = "캐해석에 맡김";
 let PAIR_Q = [];
 let SOLO_Q = [];
-let APP_CONFIG = { title: "[배포물 이름]", demoMode: true, ticketEnabled: false };
+let APP_CONFIG = { title: "[배포물 이름]", demoMode: true, ticketEnabled: false, loginEnabled: false, iapEnabled: false, passCredits: 0, passPriceKrw: 0 };
 let PASS = { ticketEnabled: false, remaining: null };
+let AUTH_TOKEN = savedToken();
+let AUTH_USER = null;
 
 /* ---------------- 상태 ---------------- */
 const state = {
@@ -306,7 +335,131 @@ function applyPass(pass) {
   if (again) again.textContent = `다시 뽑기 · ${passText()}`;
 }
 async function refreshPasses() {
-  try { applyPass(await apiFetch("/passes")); } catch { applyPass(null); }
+  if (APP_CONFIG.loginEnabled && !AUTH_TOKEN) { applyPass({ ticketEnabled: true, remaining: 0 }); return; }
+  try {
+    applyPass(await apiFetch("/passes"));
+  } catch (e) {
+    if (e.status === 401) signOut();
+    applyPass(null);
+  }
+}
+
+/* ---------------- 토스 로그인·결제 ---------------- */
+function money(won) {
+  return `${Number(won || 0).toLocaleString("ko-KR")}원`;
+}
+
+function renderAccess() {
+  const box = $("access");
+  if (!box) return;
+  // 로그인도 결제도 안 쓰면 이 영역 자체를 감춘다.
+  box.classList.toggle("hidden", !APP_CONFIG.loginEnabled && !APP_CONFIG.iapEnabled);
+
+  const remaining = Math.max(0, PASS.remaining || 0);
+  $("auth-label").textContent = AUTH_USER
+    ? `${AUTH_USER.displayName || "토스 사용자"} 로그인됨`
+    : (APP_CONFIG.loginEnabled ? "토스 로그인이 필요합니다" : "로그인 없이 쓰는 중");
+
+  $("pass-label").textContent = !APP_CONFIG.ticketEnabled
+    ? "이용권 제한 없음"
+    : AUTH_USER || !APP_CONFIG.loginEnabled
+      ? `남은 이용권 ${remaining}장`
+      : `${money(APP_CONFIG.passPriceKrw)} 결제 후 ${APP_CONFIG.passCredits}회가 지급됩니다.`;
+
+  const login = $("btn-login"), buy = $("btn-buy"), logout = $("btn-logout");
+  login.classList.toggle("hidden", !APP_CONFIG.loginEnabled || !!AUTH_USER);
+  logout.classList.toggle("hidden", !AUTH_USER);
+  buy.classList.toggle("hidden", !APP_CONFIG.iapEnabled);
+  buy.disabled = APP_CONFIG.loginEnabled && !AUTH_TOKEN;
+  buy.textContent = APP_CONFIG.passPriceKrw
+    ? `${money(APP_CONFIG.passPriceKrw)} · ${APP_CONFIG.passCredits}회 구매`
+    : `${APP_CONFIG.passCredits}회 구매`;
+}
+
+function signOut() {
+  saveToken("");
+  AUTH_USER = null;
+  PASS = { ticketEnabled: APP_CONFIG.ticketEnabled, remaining: 0 };
+  applyPass(null);
+  renderAccess();
+}
+
+async function onLogin() {
+  const btn = $("btn-login");
+  const sdk = await tossSdk();
+  if (!sdk?.appLogin) { toast("토스 앱 안에서만 로그인할 수 있어요."); return; }
+  try {
+    btn.disabled = true;
+    const { authorizationCode, referrer } = await sdk.appLogin();
+    const data = await apiFetch("/toss/login", {
+      token: "",
+      method: "POST",
+      body: JSON.stringify({ authorizationCode, referrer }),
+    });
+    saveToken(data.token);
+    AUTH_USER = data.user;
+    applyPass(data);
+    renderAccess();
+    toast("로그인했어요.");
+  } catch (e) {
+    toast(`로그인 실패: ${e.message || "원인 불명"}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// 콘솔에 SKU를 지정하지 않았으면 이용권 횟수가 이름에 든 소모성 상품을 고른다.
+function pickPassProduct(products = []) {
+  if (TOSS_IAP_SKU) return products.find((p) => p.sku === TOSS_IAP_SKU) || { sku: TOSS_IAP_SKU };
+  const label = (p) => `${p.displayName || ""} ${p.description || ""}`;
+  return products.find((p) => label(p).includes(`${APP_CONFIG.passCredits}회`)) || products[0] || null;
+}
+
+async function onBuy() {
+  const btn = $("btn-buy");
+  if (APP_CONFIG.loginEnabled && !AUTH_TOKEN) { toast("토스 로그인 후 구매할 수 있어요."); return; }
+  const sdk = await tossSdk();
+  if (!sdk?.IAP) { toast("토스 앱 안에서만 결제할 수 있어요."); return; }
+
+  try {
+    btn.disabled = true;
+    const list = await sdk.IAP.getProductItemList();
+    const product = pickPassProduct(list?.products || []);
+    if (!product?.sku) throw new Error("구매할 수 있는 이용권 상품을 찾지 못했어요.");
+
+    await new Promise((resolve, reject) => {
+      let cleanup = () => {};
+      cleanup = sdk.IAP.createOneTimePurchaseOrder({
+        options: {
+          sku: product.sku,
+          // 결제가 끝나면 orderId를 서버로 넘긴다. 지급은 서버가 한다.
+          processProductGrant: async ({ orderId }) => {
+            applyPass(await apiFetch("/iap/grant-pass", {
+              method: "POST",
+              body: JSON.stringify({
+                orderId,
+                sku: product.sku,
+                displayName: product.displayName || "",
+                amount: product.amount || APP_CONFIG.passPriceKrw,
+              }),
+            }));
+            renderAccess();
+            return true;
+          },
+        },
+        onEvent: (event) => { if (event.type === "success") { cleanup(); resolve(event.data); } },
+        onError: (error) => { cleanup(); reject(error); },
+      });
+    });
+
+    await refreshPasses();
+    renderAccess();
+    toast(`이용권 ${APP_CONFIG.passCredits}회가 지급됐어요.`);
+  } catch (e) {
+    toast(`결제 실패: ${e.message || "원인 불명"}`);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 /* ---------------- 결과 렌더링 ---------------- */
@@ -436,8 +589,12 @@ function toast(msg) {
 }
 
 async function run(mode, input, isReroll) {
+  if (APP_CONFIG.loginEnabled && !AUTH_TOKEN) {
+    toast("토스 로그인이 필요해요.");
+    return false;
+  }
   if (PASS.ticketEnabled && (PASS.remaining || 0) <= 0) {
-    toast("이용권이 없어요. 충전 후 다시 시도해 주세요.");
+    toast(APP_CONFIG.iapEnabled ? "이용권이 없어요. 구매 후 다시 시도해 주세요." : "이용권이 없어요. 충전 후 다시 시도해 주세요.");
     return false;
   }
   startLoading();
@@ -450,6 +607,7 @@ async function run(mode, input, isReroll) {
     state.last = { mode, input };
     renderResult(mode, input, data.result);
     applyPass(data.pass);
+    renderAccess();
     show("screen-result");
     if (data.result?.demo) toast("데모 모드: 예시 결과를 보여드려요.");
     return true;
@@ -500,6 +658,21 @@ $("mode-solo").addEventListener("click", () => setMode("solo"));
 $("btn-save").addEventListener("click", onSave);
 $("btn-again").addEventListener("click", () => { const l = state.last; if (l) run(l.mode, l.input, true); });
 $("btn-back").addEventListener("click", () => { show("screen-form"); });
+$("btn-login").addEventListener("click", onLogin);
+$("btn-buy").addEventListener("click", onBuy);
+$("btn-logout").addEventListener("click", signOut);
+
+// 저장된 토큰이 아직 살아 있는지 확인한다. 죽었으면 조용히 로그아웃.
+async function restoreLogin() {
+  if (!AUTH_TOKEN) return;
+  try {
+    const data = await apiFetch("/me");
+    AUTH_USER = data.user;
+  } catch {
+    saveToken("");
+    AUTH_USER = null;
+  }
+}
 
 function applyTitle(title) {
   if (!title) return;
@@ -522,7 +695,9 @@ async function boot() {
     APP_CONFIG = { ...APP_CONFIG, ...config };
     applyTitle(APP_CONFIG.title);
     renderForm();
+    await restoreLogin();
     await refreshPasses();
+    renderAccess();
   } catch (e) {
     console.error(e);
     $("form").replaceChildren(h("div", { class: "err", style: "padding:40px 22px" },

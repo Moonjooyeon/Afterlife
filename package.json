@@ -9,7 +9,8 @@
     "backend:dev": "node --watch backend/server.js",
     "frontend:dev": "npm --prefix frontend run dev",
     "build": "npm --prefix frontend run build",
-    "preview:built": "npm run build && npm start"
+    "preview:built": "npm run build && npm start",
+    "build:ait": "npm run build && frontend/node_modules/.bin/ait build"
   },
   "dependencies": {
     "jsonrepair": "^3.15.0"

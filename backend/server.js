@@ -8,6 +8,8 @@ import { demoResult } from './demo.js';
 import { buildPrompt } from './prompt.js';
 import * as passes from './passes.js';
 import * as db from './db.js';
+import * as auth from './auth.js';
+import * as toss from './toss.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -26,6 +28,7 @@ const model = process.env.GEMINI_MODEL || 'gemini-3.7-flash';
 const thinkingLevel = process.env.GEMINI_THINKING_LEVEL || 'low';
 const maxRetry = Math.max(1, Number(process.env.GENERATE_MAX_RETRY || 3));
 const databasePath = process.env.DATABASE_PATH || '';
+const tossLoginEnabled = parseBoolean(process.env.TOSS_LOGIN_ENABLED, false);
 const providers = buildProviders();
 
 const dbPath = passes.init(runtimeDir, databasePath);
@@ -62,8 +65,23 @@ const server = http.createServer(async (req, res) => {
         demoMode: providers.length === 0,
         ticketEnabled: passes.config.ticketEnabled,
         passCredits: passes.config.passCredits,
-        testPassEnabled: passes.config.testPassEnabled
+        testPassEnabled: passes.config.testPassEnabled,
+        loginEnabled: tossLoginEnabled,
+        iapEnabled: passes.config.iapEnabled,
+        passPriceKrw: passes.config.iapAmountKrw
       });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/v1/toss/login') {
+      return await handleTossLogin(req, res);
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/v1/me') {
+      return handleMe(req, res);
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/v1/iap/grant-pass') {
+      return await handleIapGrantPass(req, res);
     }
 
     if (req.method === 'GET' && url.pathname === '/api/v1/passes') {
@@ -95,15 +113,112 @@ async function serveFrontend(pathname, res) {
   return sendFile(res, filePath, path.join(staticDir, 'index.html'));
 }
 
-// 기기를 사용자 한 명으로 본다. 없으면 만들고, 감사 로그용 meta도 같이 뽑는다.
+// 요청자를 사용자 한 명으로 푼다.
+// 토스 로그인을 켜면 Bearer 토큰만 받고, 끄면 지금까지처럼 X-Device-Id로 본다.
 function userOf(req, res) {
+  const meta = db.requestMeta(req);
+  const token = auth.bearerOf(req);
+
+  if (token) {
+    const claims = auth.verifyToken(token);
+    const user = claims ? db.findUserById(claims.sub) : null;
+    if (!user) {
+      sendJson(res, 401, { error: '로그인이 만료됐어요. 다시 로그인해 주세요.' });
+      return null;
+    }
+    return { user, meta };
+  }
+
+  if (tossLoginEnabled) {
+    sendJson(res, 401, { error: '토스 로그인이 필요합니다.' });
+    return null;
+  }
+
   const deviceId = passes.normalizeDeviceId(req.headers['x-device-id']);
   if (!deviceId) {
     sendJson(res, 400, { error: 'X-Device-Id 헤더가 필요합니다.' });
     return null;
   }
+  return { user: passes.ensureDeviceUser(deviceId, meta), meta };
+}
+
+function publicUser(user) {
+  return { id: user.id, loginId: user.login_id, displayName: user.display_name };
+}
+
+async function handleTossLogin(req, res) {
+  if (!tossLoginEnabled) {
+    return sendJson(res, 403, { error: '토스 로그인이 꺼져 있습니다.' });
+  }
+  if (!toss.config.configured) {
+    return sendJson(res, 500, { error: '토스 mTLS 인증서가 설정되지 않았습니다.' });
+  }
+
   const meta = db.requestMeta(req);
-  return { user: passes.ensureUser(deviceId, meta), meta };
+  const { authorizationCode, referrer } = await readJson(req);
+  if (!authorizationCode || !referrer) {
+    return sendJson(res, 400, { error: 'authorizationCode, referrer가 필요합니다.' });
+  }
+
+  let userKey = '';
+  try {
+    const tokenBody = await toss.generateToken({ authorizationCode, referrer });
+    const accessToken = tokenBody?.success?.accessToken;
+    if (!accessToken) {
+      return sendJson(res, 502, { error: toss.tossError(tokenBody, '토스 로그인 토큰을 받지 못했습니다.') });
+    }
+    const meBody = await toss.loginMe(accessToken);
+    userKey = String(meBody?.success?.userKey || '').trim();
+    if (!userKey) {
+      return sendJson(res, 502, { error: toss.tossError(meBody, '토스 사용자 정보를 받지 못했습니다.') });
+    }
+  } catch (error) {
+    db.audit({ action: 'user.login_failed', detail: { message: error.message }, meta });
+    return sendJson(res, 502, { error: error.message || '토스 로그인에 실패했습니다.' });
+  }
+
+  const user = passes.ensureTossUser(userKey, meta);
+  db.touchLogin(user.id, meta);
+  if (passes.config.testPassEnabled) {
+    passes.grant(user, passes.config.testPassCredits, { provider: 'test', meta });
+  }
+  return sendJson(res, 200, { user: publicUser(user), token: auth.makeToken(user), ...passes.status(user) });
+}
+
+function handleMe(req, res) {
+  const ctx = userOf(req, res);
+  if (!ctx) return undefined;
+  return sendJson(res, 200, { user: publicUser(ctx.user), ...passes.status(ctx.user) });
+}
+
+async function handleIapGrantPass(req, res) {
+  const ctx = userOf(req, res);
+  if (!ctx) return undefined;
+
+  if (!passes.config.iapEnabled) {
+    db.audit({ userId: ctx.user.id, action: 'pass.grant_blocked', detail: { reason: 'iap_disabled' }, meta: ctx.meta });
+    return sendJson(res, 403, { error: '현재 결제가 꺼져 있습니다.' });
+  }
+
+  const payload = await readJson(req);
+  const orderId = String(payload.orderId || '').trim();
+  if (!orderId) return sendJson(res, 400, { error: 'orderId가 필요합니다.' });
+
+  const granted = passes.grantIapPass(ctx.user, {
+    orderId,
+    sku: String(payload.sku || ''),
+    displayName: String(payload.displayName || ''),
+    amount: Number(payload.amount || 0),
+    meta: ctx.meta
+  });
+
+  return sendJson(res, 200, {
+    status: granted.duplicated ? 'already_granted' : 'captured',
+    credits: granted.credits,
+    ticketEnabled: granted.ticketEnabled,
+    remaining: granted.remaining,
+    used: granted.used
+  });
 }
 
 function handlePasses(req, res) {
@@ -282,7 +397,29 @@ function send(res, status, data, type = 'text/plain; charset=utf-8') {
   res.end(data);
 }
 
-server.listen(port, host, () => {
+function parseBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
+
+// 설정이 어긋나면 조용히 죽지 말고 부팅할 때 말해 준다.
+async function warnAboutConfig() {
+  if (tossLoginEnabled) {
+    const check = await toss.checkCredentials();
+    if (!check.ok) console.warn(`[afterlife] TOSS_LOGIN_ENABLED=true인데 mTLS 인증서를 못 읽습니다: ${check.reason}`);
+    if (!auth.config.hasSecret) console.warn('[afterlife] SESSION_SECRET이 비어 있습니다. 재시작하면 모두 다시 로그인해야 합니다.');
+  }
+  if (passes.config.iapEnabled && !tossLoginEnabled) {
+    console.warn('[afterlife] TOSS_IAP_ENABLED=true인데 TOSS_LOGIN_ENABLED=false입니다. 결제는 로그인 뒤에만 됩니다.');
+  }
+  if (passes.config.iapEnabled && !passes.config.ticketEnabled) {
+    console.warn('[afterlife] TOSS_IAP_ENABLED=true인데 TICKET_ENABLED=false입니다. 이용권을 사도 소모되지 않습니다.');
+  }
+}
+
+server.listen(port, host, async () => {
   const mode = providers.length ? `gemini providers: ${providers.length}` : 'demo mode (GEMINI_API_KEY 없음)';
-  console.log(`[afterlife] http://${host}:${port} · static: ${path.relative(rootDir, staticDir)} · db: ${path.relative(rootDir, dbPath)} · ${mode}`);
+  const authMode = tossLoginEnabled ? 'toss login' : 'device';
+  console.log(`[afterlife] http://${host}:${port} · static: ${path.relative(rootDir, staticDir)} · db: ${path.relative(rootDir, dbPath)} · auth: ${authMode} · ${mode}`);
+  await warnAboutConfig();
 });
