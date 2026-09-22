@@ -72,7 +72,7 @@ const makeChargeKey = () => `AL-${Date.now().toString(36)}-${Math.random().toStr
 let AI_PICK = "캐해석에 맡김";
 let PAIR_Q = [];
 let SOLO_Q = [];
-let APP_CONFIG = { title: "[배포물 이름]", demoMode: true, ticketEnabled: false, loginEnabled: false, iapEnabled: false, passCredits: 0, passPriceKrw: 0 };
+let APP_CONFIG = { title: "읽지 않음", demoMode: true, ticketEnabled: false, loginEnabled: false, iapEnabled: false, passCredits: 0, passPriceKrw: 0 };
 let PASS = { ticketEnabled: false, remaining: null };
 let AUTH_TOKEN = savedToken();
 let AUTH_USER = null;

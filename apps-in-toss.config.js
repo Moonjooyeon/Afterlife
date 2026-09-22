@@ -1,6 +1,6 @@
-// 앱인토스 빌드 설정. appName은 토스 콘솔에 등록한 앱 이름으로 바꿉니다.
+// 앱인토스 빌드 설정. appName은 토스 콘솔에 등록한 값과 반드시 같아야 하고, 콘솔에서 수정할 수 없습니다.
 export default {
-  appName: 'afterlife',
+  appName: 'unread',
   brand: {
     primaryColor: '#8c3a2e'
   },
