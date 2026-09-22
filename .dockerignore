@@ -4,3 +4,4 @@ frontend/dist
 .env
 .git
 runtime
+secrets

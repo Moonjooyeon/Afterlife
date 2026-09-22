@@ -107,9 +107,17 @@ export function open(runtimeDir, databasePath) {
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec(SCHEMA);
+  ensureColumn('app_users', 'last_login_at', 'TEXT');
   auditSalt = ensureAuditSalt();
   migrateStoreJson(runtimeDir);
   return dbPath;
+}
+
+// 이미 만들어진 DB에 컬럼을 덧붙일 때 쓴다.
+function ensureColumn(table, column, type) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (columns.some(c => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }
 
 export const nowIso = () => new Date().toISOString();
@@ -164,6 +172,22 @@ export function findUser(loginId) {
   return db.prepare('SELECT * FROM app_users WHERE login_id = ?').get(loginId) || null;
 }
 
+export function findUserById(id) {
+  if (!id) return null;
+  return db.prepare('SELECT * FROM app_users WHERE id = ?').get(id) || null;
+}
+
+export function setDisplayName(userId, displayName) {
+  db.prepare('UPDATE app_users SET display_name = ?, updated_at = ? WHERE id = ?')
+    .run(displayName, nowIso(), userId);
+}
+
+export function touchLogin(userId, meta = {}) {
+  const at = nowIso();
+  db.prepare('UPDATE app_users SET last_login_at = ?, updated_at = ? WHERE id = ?').run(at, at, userId);
+  audit({ userId, action: 'user.login', detail: {}, meta });
+}
+
 /* ---------------- 주문과 이용권 ---------------- */
 
 export function createOrder({ userId, orderId = null, provider, sku = '', displayName = '', amount = 0, credits, status = 'captured' }) {
@@ -178,6 +202,12 @@ export function createOrder({ userId, orderId = null, provider, sku = '', displa
 export function findOrderByOrderId(orderId) {
   if (!orderId) return null;
   return db.prepare('SELECT * FROM purchase_orders WHERE order_id = ?').get(orderId) || null;
+}
+
+// 같은 주문으로 두 번 지급하지 않도록, 주문에 딸린 이용권을 되찾아 온다.
+export function findPassByOrder(orderId) {
+  if (!orderId) return null;
+  return db.prepare('SELECT * FROM access_passes WHERE order_id = ?').get(orderId) || null;
 }
 
 export function createPass({ userId, orderId = null, credits, expiresAt = null }) {

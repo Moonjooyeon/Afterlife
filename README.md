@@ -31,6 +31,7 @@ Vite 프론트는 `http://127.0.0.1:5173`에서 열리고, `/api/*`와 `/questio
 ## 구조
 
 ```txt
+apps-in-toss.config.js   앱인토스 빌드 설정
 frontend/                Vite 프론트엔드
 frontend/index.html      세 화면(접수 / 로딩 / 결과)의 뼈대
 frontend/src/            화면 스크립트와 스타일
@@ -55,6 +56,7 @@ docker-compose.yml       web/backend 구성
 - 뽑기마다 결을 바꾸는 랜덤 시드 (`SEEDS`)
 - 응답 JSON 검증과 재시도
 - 이용권 발급과 차감
+- 토스 mTLS 인증서와 세션 토큰 서명 키
 - SQLite 저장과 감사 로그
 
 원본 HTML은 프롬프트를 브라우저에서 조립해 서버로 넘겼습니다. 프롬프트가 이 앱의 알맹이라 서버로 옮겼고, 프론트는 문진 답변만 보냅니다. 프롬프트를 고칠 때 프론트를 다시 빌드할 필요도 없습니다.
@@ -65,7 +67,58 @@ docker-compose.yml       web/backend 구성
 
 기본값은 `TICKET_ENABLED=false`, 즉 무제한입니다. 원본 HTML의 `useTicket()` 자리에 해당합니다.
 
-켜면 `X-Device-Id` 헤더 기준으로 남은 횟수를 세고, 결과가 정상 생성된 뒤에만 1회 깎습니다. 실패하면 깎지 않습니다. 실제 결제(토스 인앱결제 등)를 붙일 때는 결제 검증 뒤에 `backend/passes.js`의 `grant()`를 호출하는 라우트를 추가하면 됩니다.
+켜면 남은 횟수를 세고, 결과가 정상 생성된 뒤에만 1회 깎습니다. 실패하면 깎지 않습니다.
+
+## 토스 로그인과 결제
+
+`TOSS_LOGIN_ENABLED=false`(기본)면 지금까지처럼 기기(`X-Device-Id`) 단위로 돕니다. 로컬 개발과 데모는 이 상태로 그냥 됩니다.
+
+켜면 이렇게 흐릅니다.
+
+```txt
+프론트 appLogin()  →  POST /api/v1/toss/login
+                        서버가 mTLS로 토스 파트너 API 조회 → userKey 확인
+                      ← 세션 토큰
+프론트 IAP 결제    →  POST /api/v1/iap/grant-pass  { orderId }
+                        서버가 이용권 지급 (같은 orderId면 한 번만)
+                      ← 남은 횟수
+```
+
+키와 인증서는 전부 서버에만 있습니다. 브라우저는 `orderId`와 `authorizationCode`만 넘깁니다.
+
+### 토스에서 받아와 채워야 하는 값
+
+`.env.example`에 `▼` 표시를 해뒀습니다.
+
+| 변수 | 어디서 받는지 |
+| --- | --- |
+| `TOSS_MTLS_CERT_PATH` | 앱인토스 콘솔에서 신청하면 토스 인증 부서가 발급 |
+| `TOSS_MTLS_KEY_PATH` | 위와 같이 발급 |
+| `TOSS_MTLS_KEY_PASSWORD` | 개인키에 비밀번호가 걸려 있을 때만 |
+| `TOSS_IAP_AMOUNT_KRW` | 콘솔에 등록한 상품 가격과 맞춥니다 |
+| `VITE_TOSS_IAP_SKU` | 콘솔에서 만든 IAP 상품의 SKU |
+| `SESSION_SECRET` | 직접 생성합니다: `openssl rand -hex 32` |
+
+인증서는 `secrets/toss/` 아래 두고 Git에는 올리지 않습니다.
+
+```bash
+mkdir -p secrets/toss
+chmod 700 secrets
+# 발급받은 파일을 secrets/toss/cert.pem, secrets/toss/key.pem으로 배치
+chmod 600 secrets/toss/*
+```
+
+값이 없으면 기능이 조용히 꺼지고 부팅할 때 경고를 찍습니다. `TOSS_LOGIN_ENABLED=true`인데 인증서를 못 읽으면 그 이유를 로그에 남깁니다.
+
+### 앱인토스 빌드
+
+`apps-in-toss.config.js`의 `appName`을 콘솔에 등록한 앱 이름으로 바꾸고:
+
+```bash
+npm run build:ait
+```
+
+토스 SDK는 토스 앱 안에서만 동작합니다. 일반 브라우저에서 로그인·구매를 누르면 "토스 앱 안에서만" 이라고 안내하고 나머지 화면은 그대로 씁니다.
 
 ## 데이터베이스
 
@@ -73,20 +126,20 @@ SQLite를 씁니다. Node 22 내장 `node:sqlite`라 의존성이 늘지 않고,
 
 | 테이블 | 뜻 |
 | --- | --- |
-| `app_users` | 사용자. 지금은 기기 하나가 사용자 한 명 |
-| `purchase_orders` | 이용권을 준 근거 (무료 지급, 테스트 지급, 나중에 결제) |
+| `app_users` | 사용자. `login_id`가 `device:<uuid>` 또는 `toss:<userKey>` |
+| `purchase_orders` | 이용권을 준 근거 (무료·테스트 지급, 토스 결제). `order_id` UNIQUE |
 | `access_passes` | 이용권 한 장과 잔여 횟수 |
 | `usage_sessions` | 생성 시도 한 번 |
 | `access_pass_charges` | 1회 차감. `charge_key` UNIQUE로 중복 차감을 DB가 막습니다 |
 | `gemini_requests` | Gemini 호출 한 건. 재시도와 폴백이 각각 한 행 |
-| `audit_logs` | 사용자 생성, 지급, 차감, 생성 성공·실패 기록 |
+| `audit_logs` | 로그인, 지급, 차감, 생성 성공·실패 기록 |
 | `app_settings` | 운영 설정 키-값 |
 
 자세한 컬럼과 감사 로그 action 목록은 `backend/API_CONTRACT.md`의 Database 절에 있습니다.
 
 기존 `runtime/store.json`이 있으면 첫 부팅 때 자동으로 SQLite에 옮기고 `store.json.migrated`로 이름을 바꿉니다.
 
-로그인과 결제는 아직 없습니다. 붙일 때 `app_users.login_id`를 `device:<uuid>`에서 `toss:<userKey>`로 바꾸고 `purchase_orders`에 실제 주문을 넣으면 나머지 테이블은 그대로 씁니다.
+테이블은 기기 모드와 토스 로그인 모드가 그대로 같이 씁니다. 로그인을 켜기 전에 쌓인 기기 사용자 기록도 남아 있습니다.
 
 ## 빌드
 

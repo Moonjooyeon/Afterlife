@@ -2,7 +2,14 @@
 
 브라우저는 Gemini API 키도, 생성 프롬프트도 들고 있지 않습니다. 모든 모델 호출은 백엔드를 거칩니다.
 
-모든 `/api/v1/*` 요청에는 `X-Device-Id` 헤더가 필요합니다. 프론트가 `localStorage`에 들고 있는 임의의 문자열이고, 개인정보는 담지 않습니다. 로그인을 붙일 때는 이 자리를 세션 토큰으로 바꾸면 됩니다.
+인증은 두 가지 모드가 있고 `TOSS_LOGIN_ENABLED`로 고릅니다.
+
+| 모드 | 조건 | 인증 방법 |
+| --- | --- | --- |
+| 기기 | `TOSS_LOGIN_ENABLED=false` (기본) | `X-Device-Id` 헤더. 프론트가 `localStorage`에 들고 있는 임의의 문자열이고 개인정보는 담지 않습니다 |
+| 토스 로그인 | `TOSS_LOGIN_ENABLED=true` | `Authorization: Bearer <token>`. `X-Device-Id`는 무시되고, 없으면 401 |
+
+토큰은 HMAC으로 서명한 payload 한 조각이라 서버에 세션 저장소가 없습니다. 유효기간은 `SESSION_TTL_DAYS`(기본 14일)입니다.
 
 ## GET `/questions.json`
 
@@ -22,11 +29,73 @@
   "demoMode": false,
   "ticketEnabled": false,
   "passCredits": 11,
-  "testPassEnabled": false
+  "testPassEnabled": false,
+  "loginEnabled": false,
+  "iapEnabled": false,
+  "passPriceKrw": 0
 }
 ```
 
+프론트는 이걸 보고 로그인·구매 버튼을 보일지 정합니다.
+
 `demoMode`가 `true`면 서버에 Gemini 키가 없다는 뜻이고, 생성 요청은 예시 결과를 돌려줍니다.
+
+## POST `/api/v1/toss/login`
+
+Apps in Toss `appLogin()`이 준 `authorizationCode`와 `referrer`를 넘깁니다. 서버가 mTLS로 토스 파트너 API에 붙어 `userKey`를 확인하고 세션 토큰을 발급합니다.
+
+### Request
+
+```json
+{ "authorizationCode": "code-from-appLogin", "referrer": "SANDBOX" }
+```
+
+### Response
+
+```json
+{
+  "user": { "id": "uuid", "loginId": "toss:USERKEY", "displayName": "토스 사용자 1234" },
+  "token": "세션 토큰",
+  "ticketEnabled": true,
+  "remaining": 0,
+  "used": 0
+}
+```
+
+### Errors
+
+- `400` `authorizationCode` 또는 `referrer` 없음
+- `403` `TOSS_LOGIN_ENABLED=false`
+- `500` mTLS 인증서 경로가 비어 있음
+- `502` 토스 파트너 API 호출 실패
+
+## GET `/api/v1/me`
+
+토큰이 아직 살아 있는지 확인하고 사용자와 잔여 이용권을 돌려줍니다.
+
+## POST `/api/v1/iap/grant-pass`
+
+Apps in Toss `IAP.createOneTimePurchaseOrder()`의 `processProductGrant`에서 받은 `orderId`를 넘깁니다. 서버가 `TICKET_PASS_CREDITS`회를 지급합니다.
+
+### Request
+
+```json
+{ "orderId": "apps-in-toss-order-id", "sku": "afterlife-11", "displayName": "11회 이용권", "amount": 693 }
+```
+
+### Response
+
+```json
+{ "status": "captured", "credits": 11, "ticketEnabled": true, "remaining": 11, "used": 0 }
+```
+
+같은 `orderId`가 다시 오면 `status`가 `already_granted`가 되고 두 번 지급하지 않습니다. `purchase_orders.order_id`가 UNIQUE라 DB 수준에서 막힙니다.
+
+### Errors
+
+- `400` `orderId` 없음
+- `401` 로그인 필요
+- `403` `TOSS_IAP_ENABLED=false`
 
 ## GET `/api/v1/passes`
 
@@ -98,6 +167,7 @@
 ```
 
 - `400` 입력이 모자람 (`mode`, `deadName`, `livingName`)
+- `401` 토스 로그인 모드인데 토큰이 없거나 만료됨
 - `402` 남은 이용권 없음
 - `409` 이미 차감이 끝난 `chargeKey`로 다시 요청 (이용권을 켰을 때만)
 - `502` Gemini 호출 실패 또는 응답 검증 실패 (`GENERATE_MAX_RETRY`만큼 재시도한 뒤)
@@ -125,14 +195,32 @@
 - `TICKET_TEST_PASS_CREDITS`: 기본값 `100`
 - `VITE_API_BASE_URL`: 프론트를 다른 도메인에 올릴 때만 채우는 프론트 빌드 변수
 
+### 토스에서 받아와 채우는 값
+
+| 변수 | 어디서 | 없으면 |
+| --- | --- | --- |
+| `TOSS_MTLS_CERT_PATH` | 앱인토스 콘솔에서 신청 → 토스 인증 부서가 발급 | 로그인이 500 |
+| `TOSS_MTLS_KEY_PATH` | 위와 같이 발급 | 로그인이 500 |
+| `TOSS_MTLS_KEY_PASSWORD` | 개인키에 비밀번호가 걸려 있을 때만 | 비워둡니다 |
+| `TOSS_IAP_AMOUNT_KRW` | 콘솔 상품 가격과 맞춥니다 | 화면에 가격이 안 보입니다 |
+| `VITE_TOSS_IAP_SKU` | 콘솔에서 만든 IAP 상품의 SKU | 상품 목록에서 이용권 횟수가 이름에 든 상품을 자동 선택 |
+| `SESSION_SECRET` | 직접 생성: `openssl rand -hex 32` | 부팅마다 새로 만들어져 재시작하면 전원 재로그인 |
+
+### 그 밖의 토스 변수
+
+- `TOSS_LOGIN_ENABLED`: 기본값 `false`
+- `TOSS_API_BASE`: 기본값 `https://apps-in-toss-api.toss.im`
+- `SESSION_TTL_DAYS`: 세션 토큰 유효기간. 기본값 `14`
+- `TOSS_IAP_ENABLED`: 기본값 `false`
+
 ## Database
 
 SQLite(`node:sqlite`, Node 22 내장)를 씁니다. 별도 의존성은 없습니다. 테이블 이름은 StarSign과 맞춰 두었습니다.
 
 | 테이블 | 한 행이 뜻하는 것 | 지금 쓰이는 곳 |
 | --- | --- | --- |
-| `app_users` | 사용자 한 명 | `login_id`가 `device:<uuid>`. 로그인을 붙이면 `toss:<userKey>`가 같은 자리에 들어갑니다 |
-| `purchase_orders` | 이용권을 준 근거 | `provider`는 `free`, `test`, `migrated`. 결제를 붙이면 `toss`가 늘어납니다 |
+| `app_users` | 사용자 한 명 | `login_id`가 기기 모드면 `device:<uuid>`, 토스 로그인이면 `toss:<userKey>` |
+| `purchase_orders` | 이용권을 준 근거 | `provider`는 `free`, `test`, `migrated`, `toss`. `order_id`가 UNIQUE라 중복 지급이 막힙니다 |
 | `access_passes` | 이용권 한 장 | `usage_limit` / `used_count`, 다 쓰면 `status`가 `exhausted` |
 | `usage_sessions` | 생성 시도 한 번 | `charge_key`가 UNIQUE. `started` → `completed` / `failed` / `demo` |
 | `access_pass_charges` | 1회 차감 | `charge_key`가 UNIQUE라 중복 차감이 DB에서 막힙니다 |
@@ -146,7 +234,7 @@ SQLite(`node:sqlite`, Node 22 내장)를 씁니다. 별도 의존성은 없습�
 
 ### 감사 로그 action
 
-`user.created`, `pass.granted`, `pass.charged`, `pass.rejected`, `generation.completed`, `generation.invalid`, `generation.failed`, `generation.rejected`, `generation.demo`, `store.migrated`
+`user.created`, `user.login`, `user.login_failed`, `pass.granted`, `pass.grant_duplicated`, `pass.grant_blocked`, `pass.charged`, `pass.rejected`, `generation.completed`, `generation.invalid`, `generation.failed`, `generation.rejected`, `generation.demo`, `store.migrated`
 
 IP와 User-Agent는 원본을 남기지 않고 `app_settings.audit_salt`를 섞은 SHA-256 앞 32자만 남깁니다. 같은 기기인지는 비교할 수 있고 원본은 복원할 수 없습니다.
 

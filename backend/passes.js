@@ -8,7 +8,10 @@ const passCredits = Number(process.env.TICKET_PASS_CREDITS || 11);
 const testPassEnabled = parseBoolean(process.env.TICKET_TEST_PASS_ENABLED, false);
 const testPassCredits = Number(process.env.TICKET_TEST_PASS_CREDITS || 100);
 
-export const config = { ticketEnabled, freeCredits, passCredits, testPassEnabled, testPassCredits };
+const iapEnabled = parseBoolean(process.env.TOSS_IAP_ENABLED, false);
+const iapAmountKrw = Number(process.env.TOSS_IAP_AMOUNT_KRW || 0);
+
+export const config = { ticketEnabled, freeCredits, passCredits, testPassEnabled, testPassCredits, iapEnabled, iapAmountKrw };
 
 export function init(runtimeDir, databasePath) {
   return db.open(runtimeDir, databasePath);
@@ -21,12 +24,21 @@ export function normalizeDeviceId(value) {
   return raw.slice(0, 64).replace(/[^A-Za-z0-9_-]/g, '');
 }
 
-// 기기를 사용자 한 명으로 본다. 로그인을 붙이면 loginId만 'toss:<userKey>'로 바뀐다.
-export function ensureUser(deviceId, meta = {}) {
-  const existing = db.findUser(`device:${deviceId}`);
+// 로그인 없이 쓸 때는 기기 하나를 사용자 한 명으로 본다.
+export function ensureDeviceUser(deviceId, meta = {}) {
+  return ensureUser(`device:${deviceId}`, '', meta);
+}
+
+// 토스 로그인 사용자. 같은 userKey면 같은 사람이다.
+export function ensureTossUser(userKey, meta = {}) {
+  return ensureUser(`toss:${userKey}`, `토스 사용자 ${String(userKey).slice(-4)}`, meta);
+}
+
+function ensureUser(loginId, displayName, meta) {
+  const existing = db.findUser(loginId);
   if (existing) return existing;
 
-  const user = db.ensureUser(`device:${deviceId}`, '', meta);
+  const user = db.ensureUser(loginId, displayName, meta);
   // 첫 방문에 주는 무료 횟수. 기본값 0이라 아무것도 안 준다.
   if (ticketEnabled && freeCredits > 0) {
     const order = db.createOrder({ userId: user.id, provider: 'free', credits: freeCredits });
@@ -51,6 +63,25 @@ export function grant(user, credits, { provider = 'test', orderId = null, sku = 
   const pass = db.createPass({ userId: user.id, orderId: order.id, credits });
   db.audit({ userId: user.id, action: 'pass.granted', detail: { reason: provider, credits, orderId }, meta });
   return { order, pass, ...status(user) };
+}
+
+// 토스 인앱결제 지급. 같은 orderId로 두 번 들어와도 한 번만 준다.
+export function grantIapPass(user, { orderId, sku = '', displayName = '', amount = 0, meta = {} }) {
+  const existingOrder = db.findOrderByOrderId(orderId);
+  if (existingOrder) {
+    db.audit({ userId: user.id, action: 'pass.grant_duplicated', detail: { orderId }, meta });
+    return { duplicated: true, pass: db.findPassByOrder(existingOrder.id), credits: existingOrder.credits, ...status(user) };
+  }
+
+  const granted = grant(user, passCredits, {
+    provider: 'toss',
+    orderId,
+    sku,
+    displayName,
+    amount: Number(amount) || iapAmountKrw,
+    meta
+  });
+  return { duplicated: false, credits: passCredits, ...granted };
 }
 
 export function startSession(user, mode, chargeKey) {
