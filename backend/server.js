@@ -112,7 +112,25 @@ async function serveFrontend(pathname, res) {
   const requested = pathname === '/' ? '/index.html' : decodeURIComponent(pathname);
   const filePath = path.normalize(path.join(staticDir, requested));
   if (!filePath.startsWith(staticDir)) return sendJson(res, 403, { error: 'Forbidden' });
+
+  // 빌드하면 Vite가 frontend/public의 내용을 dist 최상단에 복사한다.
+  // 소스를 그대로 서빙하는 개발 모드에서도 같은 주소로 열리게 public을 같이 본다.
+  if (staticDir === frontendDir) {
+    const publicPath = path.normalize(path.join(frontendDir, 'public', requested));
+    if (publicPath.startsWith(path.join(frontendDir, 'public')) && await fileExists(publicPath)) {
+      return sendFile(res, publicPath);
+    }
+  }
+
   return sendFile(res, filePath, path.join(staticDir, 'index.html'));
+}
+
+async function fileExists(filePath) {
+  try {
+    return (await fs.stat(filePath)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 // 요청자를 사용자 한 명으로 푼다.
