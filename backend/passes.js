@@ -1,8 +1,6 @@
-// 이용권 저장소. runtime/store.json에 기기 단위로 남은 횟수와 차감 기록을 남긴다.
-// 결제(토스 인앱결제 등)를 붙일 때 grant()를 결제 검증 뒤에 호출하면 된다.
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import crypto from 'node:crypto';
+// 이용권 업무 로직. 저장은 db.js(SQLite)가 맡는다.
+// 결제를 붙일 때는 결제 검증 뒤에 grant()를 부르면 된다.
+import * as db from './db.js';
 
 const ticketEnabled = parseBoolean(process.env.TICKET_ENABLED, false);
 const freeCredits = Number(process.env.TICKET_FREE_CREDITS || 0);
@@ -10,21 +8,10 @@ const passCredits = Number(process.env.TICKET_PASS_CREDITS || 11);
 const testPassEnabled = parseBoolean(process.env.TICKET_TEST_PASS_ENABLED, false);
 const testPassCredits = Number(process.env.TICKET_TEST_PASS_CREDITS || 100);
 
-let storePath = '';
-let state = { devices: {} };
-let writing = Promise.resolve();
+export const config = { ticketEnabled, freeCredits, passCredits, testPassEnabled, testPassCredits };
 
-export const config = { ticketEnabled, passCredits, testPassEnabled, testPassCredits };
-
-export async function init(runtimeDir) {
-  storePath = path.join(runtimeDir, 'store.json');
-  await fs.mkdir(runtimeDir, { recursive: true });
-  try {
-    state = JSON.parse(await fs.readFile(storePath, 'utf8'));
-  } catch {
-    state = { devices: {} };
-  }
-  if (!state.devices) state.devices = {};
+export function init(runtimeDir, databasePath) {
+  return db.open(runtimeDir, databasePath);
 }
 
 // deviceId는 프론트가 localStorage에 들고 있는 임의의 문자열이다. 개인정보를 담지 않는다.
@@ -34,62 +21,69 @@ export function normalizeDeviceId(value) {
   return raw.slice(0, 64).replace(/[^A-Za-z0-9_-]/g, '');
 }
 
-export function status(deviceId) {
-  if (!ticketEnabled) return { ticketEnabled: false, remaining: null, used: 0 };
-  const device = state.devices[deviceId];
-  if (!device) return { ticketEnabled: true, remaining: freeCredits, used: 0 };
-  return { ticketEnabled: true, remaining: Math.max(0, device.remaining || 0), used: device.used || 0 };
+// 기기를 사용자 한 명으로 본다. 로그인을 붙이면 loginId만 'toss:<userKey>'로 바뀐다.
+export function ensureUser(deviceId, meta = {}) {
+  const existing = db.findUser(`device:${deviceId}`);
+  if (existing) return existing;
+
+  const user = db.ensureUser(`device:${deviceId}`, '', meta);
+  // 첫 방문에 주는 무료 횟수. 기본값 0이라 아무것도 안 준다.
+  if (ticketEnabled && freeCredits > 0) {
+    const order = db.createOrder({ userId: user.id, provider: 'free', credits: freeCredits });
+    db.createPass({ userId: user.id, orderId: order.id, credits: freeCredits });
+    db.audit({ userId: user.id, action: 'pass.granted', detail: { reason: 'free', credits: freeCredits }, meta });
+  }
+  return user;
 }
 
-export async function grant(deviceId, credits, reason = 'grant') {
-  const device = ensureDevice(deviceId);
-  device.remaining = Math.max(0, (device.remaining || 0) + Number(credits || 0));
-  device.grants.push({ credits: Number(credits || 0), reason, at: new Date().toISOString() });
-  device.grants = device.grants.slice(-50);
-  await persist();
-  return status(deviceId);
+export function status(user) {
+  if (!ticketEnabled) return { ticketEnabled: false, remaining: null, used: db.usedCount(user.id) };
+  return { ticketEnabled: true, remaining: db.remainingCredits(user.id), used: db.usedCount(user.id) };
 }
 
-// 같은 chargeKey로 두 번 들어오면 한 번만 깎는다. (재시도·중복 클릭 방어)
-export async function consume(deviceId, chargeKey) {
-  if (!ticketEnabled) return { ok: true, ...status(deviceId) };
-  const device = ensureDevice(deviceId);
-  const key = String(chargeKey || '').slice(0, 64);
-  if (key && device.charges.includes(key)) return { ok: true, duplicated: true, ...status(deviceId) };
-  if ((device.remaining || 0) <= 0) return { ok: false, ...status(deviceId) };
-
-  device.remaining -= 1;
-  device.used = (device.used || 0) + 1;
-  if (key) device.charges = [...device.charges, key].slice(-200);
-  await persist();
-  return { ok: true, ...status(deviceId) };
-}
-
-export function hasCredit(deviceId) {
+export function hasCredit(user) {
   if (!ticketEnabled) return true;
-  return status(deviceId).remaining > 0;
+  return db.remainingCredits(user.id) > 0;
+}
+
+export function grant(user, credits, { provider = 'test', orderId = null, sku = '', displayName = '', amount = 0, meta = {} } = {}) {
+  const order = db.createOrder({ userId: user.id, orderId, provider, sku, displayName, amount, credits });
+  const pass = db.createPass({ userId: user.id, orderId: order.id, credits });
+  db.audit({ userId: user.id, action: 'pass.granted', detail: { reason: provider, credits, orderId }, meta });
+  return { order, pass, ...status(user) };
+}
+
+export function startSession(user, mode, chargeKey) {
+  const pass = ticketEnabled ? db.activePasses(user.id)[0] || null : null;
+  return db.startSession({ userId: user.id, passId: pass?.id || null, chargeKey: chargeKey || null, mode });
+}
+
+// 결과가 검증을 통과한 뒤에만 부른다. 같은 chargeKey로 두 번 들어오면 한 번만 깎는다.
+export function consume(user, { sessionId, chargeKey, meta = {} }) {
+  if (!ticketEnabled) return { ok: true, ...status(user) };
+
+  if (db.findCharge(chargeKey)) {
+    return { ok: true, duplicated: true, ...status(user) };
+  }
+
+  const pass = db.activePasses(user.id)[0];
+  if (!pass) {
+    db.audit({ userId: user.id, action: 'pass.rejected', detail: { reason: 'no_active_pass' }, meta });
+    return { ok: false, ...status(user) };
+  }
+
+  const charge = db.chargePass({ userId: user.id, passId: pass.id, sessionId, chargeKey });
+  if (!charge) {
+    db.audit({ userId: user.id, action: 'pass.rejected', detail: { reason: 'pass_exhausted', passId: pass.id }, meta });
+    return { ok: false, ...status(user) };
+  }
+
+  db.audit({ userId: user.id, action: 'pass.charged', detail: { passId: pass.id, chargeKey }, meta });
+  return { ok: true, ...status(user) };
 }
 
 export function newChargeKey() {
-  return `AL-${Date.now().toString(36)}-${crypto.randomBytes(5).toString('hex')}`;
-}
-
-function ensureDevice(deviceId) {
-  if (!state.devices[deviceId]) {
-    state.devices[deviceId] = { remaining: freeCredits, used: 0, charges: [], grants: [], createdAt: new Date().toISOString() };
-  }
-  const device = state.devices[deviceId];
-  if (!Array.isArray(device.charges)) device.charges = [];
-  if (!Array.isArray(device.grants)) device.grants = [];
-  return device;
-}
-
-// 쓰기를 직렬화해 동시 요청이 서로의 결과를 덮어쓰지 않게 한다.
-function persist() {
-  writing = writing.then(() => fs.writeFile(storePath, JSON.stringify(state, null, 2))).catch(error => {
-    console.warn(`[passes] store write failed: ${error.message}`);
-  });
-  return writing;
+  return `AL-${Date.now().toString(36)}-${db.uuid().slice(0, 8)}`;
 }
 
 function parseBoolean(value, fallback = false) {

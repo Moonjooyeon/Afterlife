@@ -24,12 +24,14 @@ export function buildProviders() {
 }
 
 // 프로바이더를 순서대로 시도하고, 첫 성공의 JSON을 반환한다.
-export async function generateJson(providers, { model, system, user, temperature = 1.0, thinkingLevel = 'low' }) {
+// logger를 주면 호출 한 건마다 시작·끝을 기록한다. (gemini_requests 테이블)
+export async function generateJson(providers, { model, system, user, temperature = 1.0, thinkingLevel = 'low', logger = null }) {
   let lastFailure = { status: 502, message: 'Gemini 요청 중 오류가 발생했습니다.' };
 
   for (let index = 0; index < providers.length; index += 1) {
     const provider = providers[index];
     const targetModel = provider.modelOverride || model;
+    const logId = logger?.start({ keyMode: provider.keyMode, requestedModel: model, actualModel: targetModel }) ?? null;
     try {
       const res = await fetch(endpointFor(targetModel, provider), {
         method: 'POST',
@@ -41,6 +43,7 @@ export async function generateJson(providers, { model, system, user, temperature
         const text = await res.text();
         const message = text || `Gemini request failed (${res.status}).`;
         logFailure(provider, res.status, message);
+        logger?.finish(logId, { ok: false, status: res.status, errorMessage: message });
         lastFailure = { status: res.status, message };
         if (shouldRetry(res.status, message, index, providers.length)) continue;
         return { ok: false, ...lastFailure };
@@ -53,12 +56,15 @@ export async function generateJson(providers, { model, system, user, temperature
       }
       const text = extractText(data, provider);
       if (!text) throw new Error('Gemini 응답이 비어 있습니다.');
-      return { ok: true, data: parseJsonText(text), keyMode: provider.keyMode, model: targetModel };
+      const parsed = parseJsonText(text);
+      logger?.finish(logId, { ok: true, status: res.status });
+      return { ok: true, data: parsed, keyMode: provider.keyMode, model: targetModel };
     } catch (error) {
       const message = error instanceof SyntaxError
         ? 'Gemini 응답을 JSON으로 해석하지 못했습니다.'
         : error.message || 'Gemini 요청 중 오류가 발생했습니다.';
       logFailure(provider, 502, message);
+      logger?.finish(logId, { ok: false, status: 502, errorMessage: message });
       lastFailure = { status: 502, message };
       if (index < providers.length - 1) continue;
       return { ok: false, ...lastFailure };
