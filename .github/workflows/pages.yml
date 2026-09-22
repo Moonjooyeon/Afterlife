@@ -1,0 +1,76 @@
+# 약관과 개인정보 처리방침을 GitHub Pages로 공개한다.
+# 앱인토스 콘솔의 약관 URL 칸에 넣을 주소가 필요해서 둔 것이고,
+# 앱 자체를 배포하면 https://<도메인>/terms.html 로 바꿔도 된다.
+name: Deploy legal pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/public/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # frontend/public을 그대로 올리면 되지만, 루트로 들어왔을 때
+      # 404가 뜨지 않도록 목차 index.html을 여기서 만들어 붙인다.
+      # (frontend/public에 index.html을 두면 Vite 빌드가 앱의 index.html과 충돌한다)
+      - name: 배포할 파일 모으기
+        run: |
+          mkdir -p _pages
+          cp frontend/public/terms.html frontend/public/privacy.html _pages/
+          cat > _pages/index.html <<'HTML'
+          <!doctype html>
+          <html lang="ko">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>읽지 않음 — 문서</title>
+          <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=Noto+Sans+KR:wght@400;500&display=swap">
+          <style>
+            body{margin:0;background:#e9e5dc;color:#1c1b19;line-height:1.8;
+              font-family:'Noto Sans KR','Apple SD Gothic Neo',sans-serif}
+            main{max-width:720px;margin:0 auto;padding:64px 24px 88px;background:#f4f1ea;min-height:100vh}
+            h1{font-family:'Gowun Batang',serif;font-size:26px;margin:0 0 6px}
+            p{font-size:15px;color:#57534b}
+            ul{list-style:none;padding:0;margin:32px 0 0}
+            li{border-top:1px solid #cbc6bb;padding:18px 0}
+            a{color:#8c3a2e;text-decoration:none;font-size:16px}
+            a:hover{text-decoration:underline}
+          </style>
+          </head>
+          <body><main>
+            <h1>읽지 않음</h1>
+            <p>서비스 문서</p>
+            <ul>
+              <li><a href="terms.html">서비스 이용약관</a></li>
+              <li><a href="privacy.html">개인정보 처리방침</a></li>
+            </ul>
+          </main></body>
+          </html>
+          HTML
+          ls -l _pages
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _pages
+      - id: deployment
+        uses: actions/deploy-pages@v4
