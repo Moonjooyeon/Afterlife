@@ -1,3 +1,5 @@
+import './env.js';
+
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
@@ -16,8 +18,6 @@ const rootDir = path.resolve(__dirname, '..');
 const frontendDir = path.join(rootDir, 'frontend');
 const frontendDistDir = path.join(frontendDir, 'dist');
 const dataDir = path.join(rootDir, 'data');
-
-await loadEnv(path.join(rootDir, '.env'));
 
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || '127.0.0.1';
@@ -359,20 +359,6 @@ function validateResult(mode, result) {
 }
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-async function loadEnv(filePath) {
-  try {
-    const raw = await fs.readFile(filePath, 'utf8');
-    for (const line of raw.split(/\r?\n/)) {
-      const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/i);
-      if (!match) continue;
-      const value = match[2].replace(/^['"]|['"]$/g, '');
-      if (process.env[match[1]] === undefined) process.env[match[1]] = value;
-    }
-  } catch {
-    // .env가 없으면 환경변수만 쓴다.
-  }
-}
 
 async function directoryExists(dirPath) {
   try {

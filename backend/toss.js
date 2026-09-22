@@ -1,5 +1,6 @@
 // Apps in Toss 파트너 API 클라이언트. mTLS 인증서로만 접속한다.
 // 인증서와 API base는 토스 콘솔에서 받아 .env에 넣는다. 없으면 로그인 기능이 꺼진다.
+import './env.js';
 import fs from 'node:fs/promises';
 import https from 'node:https';
 
