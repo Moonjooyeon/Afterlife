@@ -1,5 +1,6 @@
 // 이용권 업무 로직. 저장은 db.js(SQLite)가 맡는다.
 // 결제를 붙일 때는 결제 검증 뒤에 grant()를 부르면 된다.
+import './env.js';
 import * as db from './db.js';
 
 const ticketEnabled = parseBoolean(process.env.TICKET_ENABLED, false);

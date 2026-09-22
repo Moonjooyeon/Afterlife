@@ -1,4 +1,5 @@
 // 세션 토큰. HMAC 서명한 payload 한 조각이라 서버에 세션 저장소가 필요 없다.
+import './env.js';
 import crypto from 'node:crypto';
 
 const TOKEN_TTL_MS = Math.max(1, Number(process.env.SESSION_TTL_DAYS || 14)) * 24 * 60 * 60 * 1000;

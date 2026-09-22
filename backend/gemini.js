@@ -1,4 +1,5 @@
 // Gemini 프록시. API 키는 서버 환경변수로만 읽고, 브라우저로 내려보내지 않는다.
+import './env.js';
 import { jsonrepair } from 'jsonrepair';
 
 const defaultApiBase = 'https://generativelanguage.googleapis.com';
