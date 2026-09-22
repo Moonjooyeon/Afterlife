@@ -7,6 +7,7 @@ import { buildProviders, generateJson } from './gemini.js';
 import { demoResult } from './demo.js';
 import { buildPrompt } from './prompt.js';
 import * as passes from './passes.js';
+import * as db from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -24,9 +25,10 @@ const appTitle = process.env.APP_TITLE || '[배포물 이름]';
 const model = process.env.GEMINI_MODEL || 'gemini-3.7-flash';
 const thinkingLevel = process.env.GEMINI_THINKING_LEVEL || 'low';
 const maxRetry = Math.max(1, Number(process.env.GENERATE_MAX_RETRY || 3));
+const databasePath = process.env.DATABASE_PATH || '';
 const providers = buildProviders();
 
-await passes.init(runtimeDir);
+const dbPath = passes.init(runtimeDir, databasePath);
 
 const mimeTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -93,27 +95,42 @@ async function serveFrontend(pathname, res) {
   return sendFile(res, filePath, path.join(staticDir, 'index.html'));
 }
 
+// 기기를 사용자 한 명으로 본다. 없으면 만들고, 감사 로그용 meta도 같이 뽑는다.
+function userOf(req, res) {
+  const deviceId = passes.normalizeDeviceId(req.headers['x-device-id']);
+  if (!deviceId) {
+    sendJson(res, 400, { error: 'X-Device-Id 헤더가 필요합니다.' });
+    return null;
+  }
+  const meta = db.requestMeta(req);
+  return { user: passes.ensureUser(deviceId, meta), meta };
+}
+
 function handlePasses(req, res) {
-  const deviceId = deviceIdOf(req);
-  if (!deviceId) return sendJson(res, 400, { error: 'X-Device-Id 헤더가 필요합니다.' });
-  return sendJson(res, 200, passes.status(deviceId));
+  const ctx = userOf(req, res);
+  if (!ctx) return undefined;
+  return sendJson(res, 200, passes.status(ctx.user));
 }
 
 async function handleGrantPass(req, res) {
   if (!passes.config.testPassEnabled) {
     return sendJson(res, 403, { error: '테스트 이용권 지급이 꺼져 있습니다.' });
   }
-  const deviceId = deviceIdOf(req);
-  if (!deviceId) return sendJson(res, 400, { error: 'X-Device-Id 헤더가 필요합니다.' });
+  const ctx = userOf(req, res);
+  if (!ctx) return undefined;
   const { credits } = await readJson(req);
   const amount = Number(credits) > 0 ? Number(credits) : passes.config.testPassCredits;
-  return sendJson(res, 200, await passes.grant(deviceId, amount, 'test'));
+  const granted = passes.grant(ctx.user, amount, { provider: 'test', meta: ctx.meta });
+  return sendJson(res, 200, { ticketEnabled: granted.ticketEnabled, remaining: granted.remaining, used: granted.used });
 }
 
 async function handleAfterlife(req, res) {
-  const deviceId = deviceIdOf(req);
-  if (!deviceId) return sendJson(res, 400, { error: 'X-Device-Id 헤더가 필요합니다.' });
-  if (!passes.hasCredit(deviceId)) {
+  const ctx = userOf(req, res);
+  if (!ctx) return undefined;
+  const { user, meta } = ctx;
+
+  if (!passes.hasCredit(user)) {
+    db.audit({ userId: user.id, action: 'generation.rejected', detail: { reason: 'no_credit' }, meta });
     return sendJson(res, 402, { error: '남은 이용권이 없어요. 충전 후 다시 시도해 주세요.' });
   }
 
@@ -121,34 +138,61 @@ async function handleAfterlife(req, res) {
   const error = validateInput(mode, input);
   if (error) return sendJson(res, 400, { error });
 
+  // 이미 차감이 끝난 chargeKey면 생성을 또 해주지 않는다.
+  // (차감은 성공 뒤에만 일어나므로, 실패해서 다시 온 요청은 여기 걸리지 않는다.)
+  const key = chargeKey || passes.newChargeKey();
+  if (passes.config.ticketEnabled && db.findCharge(key)) {
+    db.audit({ userId: user.id, action: 'generation.rejected', detail: { reason: 'charge_key_used', chargeKey: key }, meta });
+    return sendJson(res, 409, { error: '이미 처리된 요청이에요. 다시 뽑기를 눌러 주세요.' });
+  }
+
+  // 같은 chargeKey로 다시 들어온 요청은 새 세션을 만들지 않는다.
+  const existing = db.findSessionByChargeKey(key);
+  const session = existing || passes.startSession(user, mode, key);
+
   // 키가 없으면 데모 결과. 이용권은 깎지 않는다.
   if (!providers.length) {
     await delay(1400);
-    return sendJson(res, 200, { result: demoResult(mode), pass: passes.status(deviceId) });
+    db.finishSession(session.id, 'demo');
+    db.audit({ userId: user.id, action: 'generation.demo', detail: { mode, sessionId: session.id }, meta });
+    return sendJson(res, 200, { result: demoResult(mode), pass: passes.status(user) });
   }
 
   let lastFailure = { status: 502, message: '결과를 만들지 못했어요.' };
-  for (let attempt = 0; attempt < maxRetry; attempt += 1) {
-    const { system, user } = buildPrompt(mode, input);
-    const outcome = await generateJson(providers, { model, system, user, thinkingLevel });
+  for (let attempt = 1; attempt <= maxRetry; attempt += 1) {
+    const logger = {
+      start: (info) => db.startGeminiRequest({ userId: user.id, sessionId: session.id, attempt, ...info }).id,
+      finish: (id, result) => db.finishGeminiRequest(id, result)
+    };
+    const { system, user: userPrompt } = buildPrompt(mode, input);
+    const outcome = await generateJson(providers, { model, system, user: userPrompt, thinkingLevel, logger });
 
     if (outcome.ok) {
       try {
         validateResult(mode, outcome.data);
       } catch (validationError) {
+        // Gemini 호출 자체는 200이었고 응답 모양이 틀린 경우. 재시도 이유를 남긴다.
+        db.audit({ userId: user.id, action: 'generation.invalid', detail: { mode, sessionId: session.id, attempt, message: validationError.message }, meta });
         lastFailure = { status: 502, message: validationError.message };
-        if (attempt < maxRetry - 1) { await delay(800 * 2 ** attempt); continue; }
+        if (attempt < maxRetry) { await delay(800 * 2 ** (attempt - 1)); continue; }
         break;
       }
       // 결과가 나온 뒤에만 차감한다. 실패했을 때 이용권이 날아가지 않도록.
-      const charged = await passes.consume(deviceId, chargeKey || passes.newChargeKey());
-      return sendJson(res, 200, { result: outcome.data, pass: { ticketEnabled: charged.ticketEnabled, remaining: charged.remaining, used: charged.used } });
+      const charged = passes.consume(user, { sessionId: session.id, chargeKey: key, meta });
+      db.finishSession(session.id, 'completed');
+      db.audit({ userId: user.id, action: 'generation.completed', detail: { mode, sessionId: session.id, attempt }, meta });
+      return sendJson(res, 200, {
+        result: outcome.data,
+        pass: { ticketEnabled: charged.ticketEnabled, remaining: charged.remaining, used: charged.used }
+      });
     }
 
     lastFailure = { status: outcome.status, message: outcome.message };
-    if (attempt < maxRetry - 1) await delay(800 * 2 ** attempt);
+    if (attempt < maxRetry) await delay(800 * 2 ** (attempt - 1));
   }
 
+  db.finishSession(session.id, 'failed');
+  db.audit({ userId: user.id, action: 'generation.failed', detail: { mode, sessionId: session.id, message: lastFailure.message }, meta });
   return sendJson(res, lastFailure.status >= 400 ? lastFailure.status : 502, { error: lastFailure.message });
 }
 
@@ -168,10 +212,6 @@ function validateResult(mode, result) {
     : ['logline', 'senses', 'drafts', 'last_draft', 'discovery', 'reply', 'final'];
   for (const key of need) if (!result?.[key]) throw new Error('응답에 ' + key + ' 없음');
   if (!Array.isArray(result.final.lines) || !result.final.lines.length) throw new Error('마지막 문장 없음');
-}
-
-function deviceIdOf(req) {
-  return passes.normalizeDeviceId(req.headers['x-device-id']);
 }
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -244,5 +284,5 @@ function send(res, status, data, type = 'text/plain; charset=utf-8') {
 
 server.listen(port, host, () => {
   const mode = providers.length ? `gemini providers: ${providers.length}` : 'demo mode (GEMINI_API_KEY 없음)';
-  console.log(`[afterlife] http://${host}:${port} · static: ${path.relative(rootDir, staticDir)} · ${mode}`);
+  console.log(`[afterlife] http://${host}:${port} · static: ${path.relative(rootDir, staticDir)} · db: ${path.relative(rootDir, dbPath)} · ${mode}`);
 });
