@@ -44,7 +44,8 @@ export async function generateJson(providers, { model, system, user, temperature
         const message = text || `Gemini request failed (${res.status}).`;
         logFailure(provider, res.status, message);
         logger?.finish(logId, { ok: false, status: res.status, errorMessage: message });
-        lastFailure = { status: res.status, message };
+        // 응답 본문을 그대로 화면에 띄우지 않고 사람이 읽을 문장만 뽑는다.
+        lastFailure = { status: res.status, message: shortMessage(message) };
         if (shouldRetry(res.status, message, index, providers.length)) continue;
         return { ok: false, ...lastFailure };
       }

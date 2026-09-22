@@ -129,13 +129,21 @@ SQLite를 씁니다. Node 22 내장 `node:sqlite`라 의존성이 늘지 않고,
 | `app_users` | 사용자. `login_id`가 `device:<uuid>` 또는 `toss:<userKey>` |
 | `purchase_orders` | 이용권을 준 근거 (무료·테스트 지급, 토스 결제). `order_id` UNIQUE |
 | `access_passes` | 이용권 한 장과 잔여 횟수 |
-| `usage_sessions` | 생성 시도 한 번 |
+| `usage_sessions` | 생성 시도 한 번. 성공한 결과를 보관 |
 | `access_pass_charges` | 1회 차감. `charge_key` UNIQUE로 중복 차감을 DB가 막습니다 |
 | `gemini_requests` | Gemini 호출 한 건. 재시도와 폴백이 각각 한 행 |
 | `audit_logs` | 로그인, 지급, 차감, 생성 성공·실패 기록 |
 | `app_settings` | 운영 설정 키-값 |
 
 자세한 컬럼과 감사 로그 action 목록은 `backend/API_CONTRACT.md`의 Database 절에 있습니다.
+
+### 결과 보관
+
+성공한 결과는 `usage_sessions.result`에 남습니다. **차감보다 먼저 저장**하므로, 차감 직후 응답이 끊겨도 같은 요청을 다시 보내면 결과를 되찾습니다. 이용권은 더 깎이지 않고 Gemini도 다시 부르지 않습니다.
+
+`RESULT_RETENTION_DAYS`(기본 30일)가 지난 결과는 자동으로 비웁니다. 세션 행은 통계용으로 남습니다.
+
+결과에는 사용자가 적은 캐릭터 이름과 설정이 들어갑니다. 보관하고 싶지 않으면 `RESULT_RETENTION_DAYS=0`으로 두세요. 대신 끊겼을 때 되찾을 수는 없습니다.
 
 기존 `runtime/store.json`이 있으면 첫 부팅 때 자동으로 SQLite에 옮기고 `store.json.migrated`로 이름을 바꿉니다.
 

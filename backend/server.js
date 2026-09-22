@@ -29,6 +29,8 @@ const thinkingLevel = process.env.GEMINI_THINKING_LEVEL || 'low';
 const maxRetry = Math.max(1, Number(process.env.GENERATE_MAX_RETRY || 3));
 const databasePath = process.env.DATABASE_PATH || '';
 const tossLoginEnabled = parseBoolean(process.env.TOSS_LOGIN_ENABLED, false);
+// 결과 보관 기간. 0이면 결과를 저장하지 않는다.
+const resultRetentionDays = Math.max(0, Number(process.env.RESULT_RETENTION_DAYS ?? 30));
 const providers = buildProviders();
 
 const dbPath = passes.init(runtimeDir, databasePath);
@@ -244,25 +246,32 @@ async function handleAfterlife(req, res) {
   if (!ctx) return undefined;
   const { user, meta } = ctx;
 
+  const { mode, input, chargeKey } = await readJson(req);
+  const error = validateInput(mode, input);
+  if (error) return sendJson(res, 400, { error });
+
+  const key = chargeKey || passes.newChargeKey();
+  const existing = db.findSessionByChargeKey(key);
+
+  // 이미 차감이 끝난 chargeKey. 차감은 성공 뒤에만 일어나므로, 이 요청은
+  // 결과를 못 받고 다시 온 것이다. 보관해 둔 결과가 있으면 그대로 돌려준다.
+  // (실패해서 다시 온 요청은 차감이 없으니 여기 걸리지 않고 아래에서 새로 생성된다.)
+  if (passes.config.ticketEnabled && db.findCharge(key)) {
+    const saved = db.readSessionResult(existing);
+    if (saved) {
+      db.audit({ userId: user.id, action: 'generation.replayed', detail: { sessionId: existing.id, chargeKey: key }, meta });
+      return sendJson(res, 200, { result: saved, pass: passes.status(user), replayed: true });
+    }
+    db.audit({ userId: user.id, action: 'generation.rejected', detail: { reason: 'charge_key_used', chargeKey: key }, meta });
+    return sendJson(res, 409, { error: '이미 처리된 요청이에요. 다시 뽑기를 눌러 주세요.' });
+  }
+
   if (!passes.hasCredit(user)) {
     db.audit({ userId: user.id, action: 'generation.rejected', detail: { reason: 'no_credit' }, meta });
     return sendJson(res, 402, { error: '남은 이용권이 없어요. 충전 후 다시 시도해 주세요.' });
   }
 
-  const { mode, input, chargeKey } = await readJson(req);
-  const error = validateInput(mode, input);
-  if (error) return sendJson(res, 400, { error });
-
-  // 이미 차감이 끝난 chargeKey면 생성을 또 해주지 않는다.
-  // (차감은 성공 뒤에만 일어나므로, 실패해서 다시 온 요청은 여기 걸리지 않는다.)
-  const key = chargeKey || passes.newChargeKey();
-  if (passes.config.ticketEnabled && db.findCharge(key)) {
-    db.audit({ userId: user.id, action: 'generation.rejected', detail: { reason: 'charge_key_used', chargeKey: key }, meta });
-    return sendJson(res, 409, { error: '이미 처리된 요청이에요. 다시 뽑기를 눌러 주세요.' });
-  }
-
   // 같은 chargeKey로 다시 들어온 요청은 새 세션을 만들지 않는다.
-  const existing = db.findSessionByChargeKey(key);
   const session = existing || passes.startSession(user, mode, key);
 
   // 키가 없으면 데모 결과. 이용권은 깎지 않는다.
@@ -292,6 +301,8 @@ async function handleAfterlife(req, res) {
         if (attempt < maxRetry) { await delay(800 * 2 ** (attempt - 1)); continue; }
         break;
       }
+      // 차감하기 전에 결과부터 저장한다. 차감 뒤에 죽어도 재요청으로 되찾을 수 있게.
+      if (resultRetentionDays > 0) db.saveSessionResult(session.id, outcome.data);
       // 결과가 나온 뒤에만 차감한다. 실패했을 때 이용권이 날아가지 않도록.
       const charged = passes.consume(user, { sessionId: session.id, chargeKey: key, meta });
       db.finishSession(session.id, 'completed');
@@ -417,9 +428,22 @@ async function warnAboutConfig() {
   }
 }
 
+// 보관 기간이 지난 결과를 지운다. 부팅할 때 한 번, 그 뒤로는 6시간마다.
+function startResultPruner() {
+  if (!(resultRetentionDays > 0)) return;
+  const prune = () => {
+    const cleared = db.pruneResults(resultRetentionDays);
+    if (cleared) console.log(`[afterlife] 보관 기간이 지난 결과 ${cleared}건을 지웠습니다.`);
+  };
+  prune();
+  setInterval(prune, 6 * 60 * 60 * 1000).unref();
+}
+
 server.listen(port, host, async () => {
   const mode = providers.length ? `gemini providers: ${providers.length}` : 'demo mode (GEMINI_API_KEY 없음)';
   const authMode = tossLoginEnabled ? 'toss login' : 'device';
-  console.log(`[afterlife] http://${host}:${port} · static: ${path.relative(rootDir, staticDir)} · db: ${path.relative(rootDir, dbPath)} · auth: ${authMode} · ${mode}`);
+  const retention = resultRetentionDays > 0 ? `results: ${resultRetentionDays}d` : 'results: 저장 안 함';
+  console.log(`[afterlife] http://${host}:${port} · static: ${path.relative(rootDir, staticDir)} · db: ${path.relative(rootDir, dbPath)} · auth: ${authMode} · ${retention} · ${mode}`);
+  startResultPruner();
   await warnAboutConfig();
 });

@@ -153,6 +153,8 @@ Apps in Toss `IAP.createOneTimePurchaseOrder()`의 `processProductGrant`에서 �
 }
 ```
 
+이미 차감이 끝난 `chargeKey`로 다시 요청하면 보관해 둔 결과를 그대로 돌려주고 `replayed: true`를 붙입니다. 이용권은 더 깎지 않고 Gemini도 다시 부르지 않습니다.
+
 `result`의 모양은 모드별로 다릅니다.
 
 - `pair`: `years`, `cause`, `news`, `messages`, `end_notice`, `aftermath`, `final`
@@ -169,7 +171,7 @@ Apps in Toss `IAP.createOneTimePurchaseOrder()`의 `processProductGrant`에서 �
 - `400` 입력이 모자람 (`mode`, `deadName`, `livingName`)
 - `401` 토스 로그인 모드인데 토큰이 없거나 만료됨
 - `402` 남은 이용권 없음
-- `409` 이미 차감이 끝난 `chargeKey`로 다시 요청 (이용권을 켰을 때만)
+- `409` 이미 차감이 끝난 `chargeKey`인데 보관된 결과가 없을 때 (`RESULT_RETENTION_DAYS=0`이거나 보관 기간이 지난 경우)
 - `502` Gemini 호출 실패 또는 응답 검증 실패 (`GENERATE_MAX_RETRY`만큼 재시도한 뒤)
 
 ## Environment
@@ -183,6 +185,7 @@ Apps in Toss `IAP.createOneTimePurchaseOrder()`의 `processProductGrant`에서 �
 - `GEMINI_THINKING_LEVEL`: 기본값 `low`. 원가 핵심이라 낮게 고정합니다
 - `GEMINI_MAX_OUTPUT_TOKENS`: 기본값 `8192`
 - `GENERATE_MAX_RETRY`: 기본값 `3`
+- `RESULT_RETENTION_DAYS`: 생성 결과 보관 기간(일). 기본값 `30`, `0`이면 저장하지 않음
 - `APP_TITLE`: 배포물 이름. 프론트의 제목과 푸터에 그대로 들어갑니다
 - `PORT`: 기본값 `3000`
 - `HOST`: 기본값 `127.0.0.1`
@@ -222,7 +225,7 @@ SQLite(`node:sqlite`, Node 22 내장)를 씁니다. 별도 의존성은 없습�
 | `app_users` | 사용자 한 명 | `login_id`가 기기 모드면 `device:<uuid>`, 토스 로그인이면 `toss:<userKey>` |
 | `purchase_orders` | 이용권을 준 근거 | `provider`는 `free`, `test`, `migrated`, `toss`. `order_id`가 UNIQUE라 중복 지급이 막힙니다 |
 | `access_passes` | 이용권 한 장 | `usage_limit` / `used_count`, 다 쓰면 `status`가 `exhausted` |
-| `usage_sessions` | 생성 시도 한 번 | `charge_key`가 UNIQUE. `started` → `completed` / `failed` / `demo` |
+| `usage_sessions` | 생성 시도 한 번 | `charge_key`가 UNIQUE. `started` → `completed` / `failed` / `demo`. 성공한 결과를 `result`에 보관 |
 | `access_pass_charges` | 1회 차감 | `charge_key`가 UNIQUE라 중복 차감이 DB에서 막힙니다 |
 | `gemini_requests` | Gemini 호출 한 건 | 재시도와 프로바이더 폴백이 각각 한 행 |
 | `audit_logs` | 감사 기록 | 아래 참고 |
@@ -232,9 +235,17 @@ SQLite(`node:sqlite`, Node 22 내장)를 씁니다. 별도 의존성은 없습�
 
 `remaining`은 활성 `access_passes`의 `usage_limit - used_count` 합입니다. 차감은 가장 오래된 활성 이용권부터 씁니다. 차감과 소진 처리는 `BEGIN IMMEDIATE` 트랜잭션 한 번에 묶여 있습니다.
 
+### 결과 보관
+
+성공한 결과는 `usage_sessions.result`에 JSON 문자열로 들어갑니다. **차감보다 먼저 저장**하므로, 차감 직후 응답이 끊겨도 같은 `chargeKey`로 다시 요청하면 되찾을 수 있습니다.
+
+`RESULT_RETENTION_DAYS`(기본 30일)가 지난 결과는 `result`만 `NULL`로 비우고 세션 행은 통계용으로 남깁니다. 정리는 부팅할 때 한 번, 그 뒤로는 6시간마다 돕니다.
+
+결과에는 사용자가 적은 캐릭터 이름과 설정이 들어갑니다. 보관하고 싶지 않으면 `RESULT_RETENTION_DAYS=0`으로 두면 저장하지 않고, 이 경우 재요청은 409가 됩니다.
+
 ### 감사 로그 action
 
-`user.created`, `user.login`, `user.login_failed`, `pass.granted`, `pass.grant_duplicated`, `pass.grant_blocked`, `pass.charged`, `pass.rejected`, `generation.completed`, `generation.invalid`, `generation.failed`, `generation.rejected`, `generation.demo`, `store.migrated`
+`user.created`, `user.login`, `user.login_failed`, `pass.granted`, `pass.grant_duplicated`, `pass.grant_blocked`, `pass.charged`, `pass.rejected`, `generation.completed`, `generation.replayed`, `generation.invalid`, `generation.failed`, `generation.rejected`, `generation.demo`, `store.migrated`
 
 IP와 User-Agent는 원본을 남기지 않고 `app_settings.audit_salt`를 섞은 SHA-256 앞 32자만 남깁니다. 같은 기기인지는 비교할 수 있고 원본은 복원할 수 없습니다.
 
