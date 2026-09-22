@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light only">
+<title>[배포물 이름]</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=Noto+Sans+KR:wght@400;500&display=swap">
+<link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+<div class="app">
+
+<section id="screen-form">
+  <header class="mast">
+    <div class="kicker">訃 告</div>
+    <h1 data-title>[배포물 이름]</h1>
+    <p>두 사람 중 한 사람이 먼저 떠났습니다.<br>남은 사람은 그 뒤를 어떻게 살았을까요.</p>
+  </header>
+  <div class="modes" role="group" aria-label="모드 선택">
+    <button type="button" id="mode-pair" aria-pressed="true">두 사람의 이야기</button>
+    <button type="button" id="mode-solo" aria-pressed="false">한 사람의 이야기</button>
+  </div>
+  <div class="form" id="form"></div>
+</section>
+
+<section id="screen-loading" class="loading hidden" aria-live="polite">
+  <div><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+  <p id="loading-text" style="margin-top:22px;font-size:15px">기록을 정리하는 중</p>
+</section>
+
+<section id="screen-result" class="hidden">
+  <div id="result-card"></div>
+  <div class="r-actions">
+    <div class="row">
+      <button type="button" class="save" id="btn-save">이미지로 저장</button>
+      <button type="button" class="again" id="btn-again">다시 뽑기</button>
+    </div>
+    <button type="button" class="back" id="btn-back">입력으로 돌아가기</button>
+    <div class="credit" data-title>[배포물 이름]</div>
+  </div>
+</section>
+
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

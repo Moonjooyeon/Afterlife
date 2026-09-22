@@ -1,0 +1,17 @@
+{
+  "name": "afterlife-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node backend/server.js",
+    "dev": "node --watch backend/server.js",
+    "backend:dev": "node --watch backend/server.js",
+    "frontend:dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "preview:built": "npm run build && npm start"
+  },
+  "dependencies": {
+    "jsonrepair": "^3.15.0"
+  }
+}
