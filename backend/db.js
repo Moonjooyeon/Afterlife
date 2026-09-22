@@ -108,6 +108,8 @@ export function open(runtimeDir, databasePath) {
   db.exec('PRAGMA foreign_keys = ON');
   db.exec(SCHEMA);
   ensureColumn('app_users', 'last_login_at', 'TEXT');
+  ensureColumn('usage_sessions', 'result', 'TEXT');
+  ensureColumn('usage_sessions', 'result_saved_at', 'TEXT');
   auditSalt = ensureAuditSalt();
   migrateStoreJson(runtimeDir);
   return dbPath;
@@ -292,6 +294,32 @@ export function finishSession(sessionId, status) {
 export function findSessionByChargeKey(chargeKey) {
   if (!chargeKey) return null;
   return db.prepare('SELECT * FROM usage_sessions WHERE charge_key = ?').get(chargeKey) || null;
+}
+
+// 차감한 뒤 응답이 끊겨도 같은 chargeKey로 결과를 돌려줄 수 있게 보관한다.
+export function saveSessionResult(sessionId, result) {
+  db.prepare('UPDATE usage_sessions SET result = ?, result_saved_at = ? WHERE id = ?')
+    .run(JSON.stringify(result), nowIso(), sessionId);
+}
+
+export function readSessionResult(session) {
+  if (!session?.result) return null;
+  try {
+    return JSON.parse(session.result);
+  } catch {
+    return null;
+  }
+}
+
+// 보관 기간이 지난 결과만 지운다. 세션 행 자체는 통계용으로 남긴다.
+export function pruneResults(days) {
+  if (!(days > 0)) return 0;
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const info = db.prepare(`
+    UPDATE usage_sessions SET result = NULL, result_saved_at = NULL
+    WHERE result IS NOT NULL AND result_saved_at < ?
+  `).run(cutoff);
+  return Number(info.changes || 0);
 }
 
 /* ---------------- Gemini 호출 로그 ---------------- */
