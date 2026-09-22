@@ -566,7 +566,10 @@ function renderSolo(input, r) {
 function renderResult(mode, input, r) {
   const card = $("result-card");
   const img = state.images[mode].scene;
-  card.replaceChildren(...(mode === "pair" ? renderPair(input, r) : renderSolo(input, r)));
+  // interlude()는 이미지가 없으면 null을 돌려준다. replaceChildren에 그대로 넘기면
+  // "null"이 글자로 찍히므로 걸러낸다.
+  const parts = (mode === "pair" ? renderPair(input, r) : renderSolo(input, r)).filter(Boolean);
+  card.replaceChildren(...parts);
   $("btn-again").textContent = "다시 뽑기 · 이용권 1장";
 }
 
