@@ -25,7 +25,7 @@
 
 ```json
 {
-  "title": "[배포물 이름]",
+  "title": "읽지 않음",
   "demoMode": false,
   "ticketEnabled": false,
   "passCredits": 11,
@@ -186,7 +186,7 @@ Apps in Toss `IAP.createOneTimePurchaseOrder()`의 `processProductGrant`에서 �
 - `GEMINI_MAX_OUTPUT_TOKENS`: 기본값 `8192`
 - `GENERATE_MAX_RETRY`: 기본값 `3`
 - `RESULT_RETENTION_DAYS`: 생성 결과 보관 기간(일). 기본값 `30`, `0`이면 저장하지 않음
-- `APP_TITLE`: 배포물 이름. 프론트의 제목과 푸터에 그대로 들어갑니다
+- `APP_TITLE`: 화면에 뜨는 앱 이름. 기본값 `읽지 않음`. 프론트의 제목과 푸터에 그대로 들어갑니다
 - `PORT`: 기본값 `3000`
 - `HOST`: 기본값 `127.0.0.1`
 - `RUNTIME_DIR`: DB와 런타임 데이터 디렉터리. 기본값 `runtime`
