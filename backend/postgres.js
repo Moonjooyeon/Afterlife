@@ -46,6 +46,12 @@ export async function touchLogin(id,meta={}) {
 }
 export const createOrder = ({userId,orderId=null,provider,sku='',displayName='',amount=0,credits,status='captured'}) => one('INSERT INTO purchase_orders(id,user_id,order_id,provider,sku,display_name,amount,credits,status,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *',[uuid(),userId,orderId,provider,sku,displayName,amount,credits,status,nowIso()]);
 export const findOrderByOrderId = id => one('SELECT * FROM purchase_orders WHERE order_id=$1',[id]);
+export const spendableOrders = async userId => (await query("SELECT o.* FROM purchase_orders o JOIN access_passes p ON p.order_id=o.id WHERE o.user_id=$1 AND o.provider='toss' AND p.status='active' AND p.used_count<p.usage_limit",[userId])).rows;
+export const revokeOrder = orderId => transaction(async () => {
+  await lockOrder(orderId);
+  await query("UPDATE purchase_orders SET status='refunded' WHERE order_id=$1",[orderId]);
+  await query("UPDATE access_passes SET status='revoked',updated_at=$1 WHERE order_id IN (SELECT id FROM purchase_orders WHERE order_id=$2)",[nowIso(),orderId]);
+});
 export const findPassByOrder = id => one('SELECT * FROM access_passes WHERE order_id=$1',[id]);
 export const createPass = ({userId,orderId=null,credits,expiresAt=null}) => one("INSERT INTO access_passes(id,user_id,order_id,status,usage_limit,used_count,expires_at,created_at,updated_at) VALUES($1,$2,$3,'active',$4,0,$5,$6,$6) RETURNING *",[uuid(),userId,orderId,credits,expiresAt,nowIso()]);
 export const activePasses = async userId => (await query("SELECT * FROM access_passes WHERE user_id=$1 AND status='active' AND used_count<usage_limit AND (expires_at IS NULL OR expires_at>$2) ORDER BY created_at,id",[userId,nowIso()])).rows;

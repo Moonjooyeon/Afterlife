@@ -49,6 +49,15 @@ test('PostgreSQL concurrent grants and charges never duplicate credits or oversp
   const charged = await Promise.all(Array.from({length:20},(_,i)=>passes.consume(user,{sessionId:null,chargeKey:`parallel-${suffix}-${i}`})));
   assert.equal(charged.filter(c=>c.ok).length,11);
   assert.equal((await passes.status(user)).remaining,0);
+  await passes.grantIapPass(user,{orderId:`refund-${suffix}`});
+  await db.revokeOrder(`refund-${suffix}`);
+  assert.equal((await passes.status(user)).remaining,0);
+  await passes.grantIapPass(user,{orderId:`refund-${suffix}`});
+  assert.equal((await passes.status(user)).remaining,0);
+  const release = await db.lockGeneration(user.id);
+  assert.ok(release);
+  assert.equal(await db.lockGeneration(user.id),null);
+  await release();
 });
 
 test('Toss order verification rejects wrong owner, SKU, status and order ID', async () => {

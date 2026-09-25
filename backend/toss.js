@@ -53,6 +53,12 @@ export function tossError(body, fallback) {
 }
 
 export async function verifyOrder({ orderId, userKey, sku }) {
+  const order = await getOrder({ orderId, userKey, sku });
+  if (!['PURCHASED', 'PAYMENT_COMPLETED'].includes(order.status)) throw new Error('완료된 결제가 아닙니다.');
+  return order;
+}
+
+export async function getOrder({ orderId, userKey, sku }) {
   if (!userKey || !sku || !orderId) throw new Error('주문 검증 설정이 누락됐습니다.');
   const response = await httpJson('/api-partner/v1/apps-in-toss/order/get-order-status', {
     method: 'POST', headers: { 'x-toss-user-key': String(userKey) }, body: { orderId }
@@ -61,7 +67,6 @@ export async function verifyOrder({ orderId, userKey, sku }) {
   if (response?.resultType !== 'SUCCESS' || !order || order.orderId !== orderId || order.sku !== sku) {
     throw new Error('해당 사용자의 이용권 주문을 확인하지 못했습니다.');
   }
-  if (!['PURCHASED', 'PAYMENT_COMPLETED'].includes(order.status)) throw new Error('완료된 결제가 아닙니다.');
   return order;
 }
 

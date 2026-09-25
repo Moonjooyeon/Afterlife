@@ -300,6 +300,16 @@ async function handleAfterlife(req, res) {
     return sendJson(res, 409, { error: '이미 처리된 요청이에요. 다시 뽑기를 눌러 주세요.' });
   }
 
+  // 환불 완료된 주문으로 남은 이용권을 쓰지 못하도록 생성 직전에 확인한다.
+  if (passes.config.iapEnabled && db.spendableOrders && user.login_id.startsWith('toss:')) {
+    try {
+      for (const order of await db.spendableOrders(user.id)) {
+        const state = await toss.getOrder({ orderId: order.order_id, userKey: user.login_id.slice(5), sku: order.sku });
+        if (state.status === 'REFUNDED') await db.revokeOrder(order.order_id);
+        else if (!['PURCHASED', 'PAYMENT_COMPLETED'].includes(state.status)) throw new Error('Order pending');
+      }
+    } catch { return sendJson(res, 503, { error: '이용권 결제 상태를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.' }); }
+  }
   if (!(await passes.hasCredit(user))) {
     (await db.audit({ userId: user.id, action: 'generation.rejected', detail: { reason: 'no_credit' }, meta }));
     return sendJson(res, 402, { error: '남은 이용권이 없어요. 충전 후 다시 시도해 주세요.' });
