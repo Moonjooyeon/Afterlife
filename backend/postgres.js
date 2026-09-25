@@ -5,6 +5,8 @@ import fs from 'node:fs/promises';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 10 });
+// Long AI requests must not occupy all connections used for ordinary queries.
+const generationLocks = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 10 });
 const context = new AsyncLocalStorage();
 let auditSalt;
 export const nowIso = () => new Date().toISOString();
@@ -30,7 +32,7 @@ export async function open() {
   auditSalt = await getSetting('audit_salt');
   return 'postgresql';
 }
-export const close = () => pool.end();
+export const close = () => Promise.all([pool.end(), generationLocks.end()]);
 export const getSetting = async key => (await one('SELECT value FROM app_settings WHERE key=$1', [key]))?.value ?? null;
 export const setSetting = (key,value) => query('INSERT INTO app_settings(key,value,updated_at) VALUES ($1,$2,$3) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at', [key,String(value),nowIso()]);
 export const findUser = loginId => one('SELECT * FROM app_users WHERE login_id=$1',[loginId]);
@@ -60,7 +62,7 @@ export const usedCount = async id => Number((await one('SELECT count(*) AS n FRO
 export const findCharge = id => one('SELECT * FROM access_pass_charges WHERE charge_key=$1',[id]);
 export const lockOrder = id => query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[id]);
 export async function lockGeneration(userId) {
-  const client = await pool.connect();
+  const client = await generationLocks.connect();
   const key = `generation:${userId}`;
   try {
     const result = await client.query('SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS locked',[key]);
