@@ -3,6 +3,7 @@
 import './env.js';
 import fs from 'node:fs/promises';
 import https from 'node:https';
+import tls from 'node:tls';
 
 const apiBase = (process.env.TOSS_API_BASE || 'https://apps-in-toss-api.toss.im').replace(/\/+$/, '');
 const certPath = String(process.env.TOSS_MTLS_CERT_PATH || '').trim();
@@ -23,6 +24,7 @@ export async function checkCredentials() {
   if (!config.configured) return { ok: false, reason: 'TOSS_MTLS_CERT_PATH / TOSS_MTLS_KEY_PATH가 비어 있습니다.' };
   try {
     await loadCredentials();
+    tls.createSecureContext({ ...credentials, passphrase: keyPassword || undefined });
     return { ok: true };
   } catch (error) {
     return { ok: false, reason: error.message };
@@ -48,6 +50,19 @@ export function tossError(body, fallback) {
   const error = body?.error;
   if (error && typeof error === 'object') return error.reason || error.message || error.errorCode || fallback;
   return body?.message || body?.error || fallback;
+}
+
+export async function verifyOrder({ orderId, userKey, sku }) {
+  if (!userKey || !sku || !orderId) throw new Error('주문 검증 설정이 누락됐습니다.');
+  const response = await httpJson('/api-partner/v1/apps-in-toss/order/get-order-status', {
+    method: 'POST', headers: { 'x-toss-user-key': String(userKey) }, body: { orderId }
+  });
+  const order = response?.success;
+  if (response?.resultType !== 'SUCCESS' || !order || order.orderId !== orderId || order.sku !== sku) {
+    throw new Error('해당 사용자의 이용권 주문을 확인하지 못했습니다.');
+  }
+  if (!['PURCHASED', 'PAYMENT_COMPLETED'].includes(order.status)) throw new Error('완료된 결제가 아닙니다.');
+  return order;
 }
 
 async function loadCredentials() {
@@ -90,6 +105,7 @@ function httpJson(pathname, { method = 'GET', headers = {}, body = null } = {}) 
       });
     });
     request.on('error', reject);
+    request.setTimeout(15000, () => request.destroy(new Error('토스 API 응답 시간이 초과됐습니다.')));
     if (data) request.write(data);
     request.end();
   }));
