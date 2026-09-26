@@ -1,4 +1,5 @@
 import './env.js';
+import { hasAuditAccess, auditLimit, clientErrorDetail, publicAuditRow } from './audit.js';
 
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -9,7 +10,7 @@ import { buildProviders, generateJson } from './gemini.js';
 import { demoResult } from './demo.js';
 import { buildPrompt } from './prompt.js';
 import * as passes from './passes.js';
-import * as db from './db.js';
+import db from './database.js';
 import * as auth from './auth.js';
 import * as toss from './toss.js';
 
@@ -33,7 +34,7 @@ const tossLoginEnabled = parseBoolean(process.env.TOSS_LOGIN_ENABLED, false);
 const resultRetentionDays = Math.max(0, Number(process.env.RESULT_RETENTION_DAYS ?? 30));
 const providers = buildProviders();
 
-const dbPath = passes.init(runtimeDir, databasePath);
+const dbPath = (await passes.init(runtimeDir, databasePath));
 
 const mimeTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -57,7 +58,22 @@ const server = http.createServer(async (req, res) => {
       return await sendFile(res, path.join(dataDir, 'questions.json'));
     }
 
+    if (req.method === 'GET' && url.pathname === '/api/v1/audit/recent') {
+      if (!hasAuditAccess(req)) return sendJson(res, 403, { error: '감사로그 접근 권한이 없습니다.' });
+      const rows = await db.listAuditLogs(auditLimit(url.searchParams.get('limit')));
+      return sendJson(res, 200, { logs: rows.map(publicAuditRow) });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/v1/audit/client-error') {
+      if (!auth.bearerOf(req)) return sendJson(res, 401, { error: '토스 로그인이 필요합니다.' });
+      const ctx = await userOf(req, res);
+      if (!ctx) return;
+      const detail = clientErrorDetail(await readJson(req));
+      await db.audit({ userId: ctx.user.id, action: 'client_report_error', detail, meta: ctx.meta });
+      return send(res, 204, '');
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/v1/health') {
+      await db.getSetting('audit_salt');
       return sendJson(res, 200, { status: 'ok' });
     }
 
@@ -70,6 +86,7 @@ const server = http.createServer(async (req, res) => {
         testPassEnabled: passes.config.testPassEnabled,
         loginEnabled: tossLoginEnabled,
         iapEnabled: passes.config.iapEnabled,
+        iapSku: process.env.TOSS_IAP_SKU || '',
         passPriceKrw: passes.config.iapAmountKrw
       });
     }
@@ -79,7 +96,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && url.pathname === '/api/v1/me') {
-      return handleMe(req, res);
+      return (await handleMe(req, res));
     }
 
     if (req.method === 'POST' && url.pathname === '/api/v1/iap/grant-pass') {
@@ -87,7 +104,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && url.pathname === '/api/v1/passes') {
-      return handlePasses(req, res);
+      return (await handlePasses(req, res));
     }
 
     if (req.method === 'POST' && url.pathname === '/api/v1/passes/grant') {
@@ -135,13 +152,13 @@ async function fileExists(filePath) {
 
 // 요청자를 사용자 한 명으로 푼다.
 // 토스 로그인을 켜면 Bearer 토큰만 받고, 끄면 지금까지처럼 X-Device-Id로 본다.
-function userOf(req, res) {
+async function userOf(req, res) {
   const meta = db.requestMeta(req);
   const token = auth.bearerOf(req);
 
   if (token) {
     const claims = auth.verifyToken(token);
-    const user = claims ? db.findUserById(claims.sub) : null;
+    const user = claims ? (await db.findUserById(claims.sub)) : null;
     if (!user) {
       sendJson(res, 401, { error: '로그인이 만료됐어요. 다시 로그인해 주세요.' });
       return null;
@@ -159,7 +176,7 @@ function userOf(req, res) {
     sendJson(res, 400, { error: 'X-Device-Id 헤더가 필요합니다.' });
     return null;
   }
-  return { user: passes.ensureDeviceUser(deviceId, meta), meta };
+  return { user: (await passes.ensureDeviceUser(deviceId, meta)), meta };
 }
 
 function publicUser(user) {
@@ -193,30 +210,30 @@ async function handleTossLogin(req, res) {
       return sendJson(res, 502, { error: toss.tossError(meBody, '토스 사용자 정보를 받지 못했습니다.') });
     }
   } catch (error) {
-    db.audit({ action: 'user.login_failed', detail: { message: error.message }, meta });
+    (await db.audit({ action: 'user.login_failed', detail: { message: error.message }, meta }));
     return sendJson(res, 502, { error: error.message || '토스 로그인에 실패했습니다.' });
   }
 
-  const user = passes.ensureTossUser(userKey, meta);
-  db.touchLogin(user.id, meta);
+  const user = (await passes.ensureTossUser(userKey, meta));
+  (await db.touchLogin(user.id, meta));
   if (passes.config.testPassEnabled) {
-    passes.grant(user, passes.config.testPassCredits, { provider: 'test', meta });
+    (await passes.grant(user, passes.config.testPassCredits, { provider: 'test', meta }));
   }
-  return sendJson(res, 200, { user: publicUser(user), token: auth.makeToken(user), ...passes.status(user) });
+  return sendJson(res, 200, { user: publicUser(user), token: auth.makeToken(user), ...(await passes.status(user)) });
 }
 
-function handleMe(req, res) {
-  const ctx = userOf(req, res);
+async function handleMe(req, res) {
+  const ctx = (await userOf(req, res));
   if (!ctx) return undefined;
-  return sendJson(res, 200, { user: publicUser(ctx.user), ...passes.status(ctx.user) });
+  return sendJson(res, 200, { user: publicUser(ctx.user), ...(await passes.status(ctx.user)) });
 }
 
 async function handleIapGrantPass(req, res) {
-  const ctx = userOf(req, res);
+  const ctx = (await userOf(req, res));
   if (!ctx) return undefined;
 
   if (!passes.config.iapEnabled) {
-    db.audit({ userId: ctx.user.id, action: 'pass.grant_blocked', detail: { reason: 'iap_disabled' }, meta: ctx.meta });
+    (await db.audit({ userId: ctx.user.id, action: 'pass.grant_blocked', detail: { reason: 'iap_disabled' }, meta: ctx.meta }));
     return sendJson(res, 403, { error: '현재 결제가 꺼져 있습니다.' });
   }
 
@@ -224,13 +241,22 @@ async function handleIapGrantPass(req, res) {
   const orderId = String(payload.orderId || '').trim();
   if (!orderId) return sendJson(res, 400, { error: 'orderId가 필요합니다.' });
 
-  const granted = passes.grantIapPass(ctx.user, {
+  if (!ctx.user.login_id.startsWith('toss:')) return sendJson(res, 401, { error: '토스 로그인 후 결제할 수 있습니다.' });
+  const sku = String(process.env.TOSS_IAP_SKU || '').trim();
+  if (!sku) return sendJson(res, 503, { error: '서버 상품 설정이 필요합니다.' });
+  try {
+    await toss.verifyOrder({ orderId, userKey: ctx.user.login_id.slice(5), sku });
+  } catch {
+    return sendJson(res, 422, { error: '결제 확인에 실패했습니다. 잠시 후 다시 시도해 주세요.' });
+  }
+
+  const granted = (await passes.grantIapPass(ctx.user, {
     orderId,
-    sku: String(payload.sku || ''),
-    displayName: String(payload.displayName || ''),
-    amount: Number(payload.amount || 0),
+    sku,
+    displayName: `${passes.config.passCredits}회 이용권`,
+    amount: passes.config.iapAmountKrw,
     meta: ctx.meta
-  });
+  }));
 
   return sendJson(res, 200, {
     status: granted.duplicated ? 'already_granted' : 'captured',
@@ -241,26 +267,26 @@ async function handleIapGrantPass(req, res) {
   });
 }
 
-function handlePasses(req, res) {
-  const ctx = userOf(req, res);
+async function handlePasses(req, res) {
+  const ctx = (await userOf(req, res));
   if (!ctx) return undefined;
-  return sendJson(res, 200, passes.status(ctx.user));
+  return sendJson(res, 200, (await passes.status(ctx.user)));
 }
 
 async function handleGrantPass(req, res) {
   if (!passes.config.testPassEnabled) {
     return sendJson(res, 403, { error: '테스트 이용권 지급이 꺼져 있습니다.' });
   }
-  const ctx = userOf(req, res);
+  const ctx = (await userOf(req, res));
   if (!ctx) return undefined;
   const { credits } = await readJson(req);
   const amount = Number(credits) > 0 ? Number(credits) : passes.config.testPassCredits;
-  const granted = passes.grant(ctx.user, amount, { provider: 'test', meta: ctx.meta });
+  const granted = (await passes.grant(ctx.user, amount, { provider: 'test', meta: ctx.meta }));
   return sendJson(res, 200, { ticketEnabled: granted.ticketEnabled, remaining: granted.remaining, used: granted.used });
 }
 
 async function handleAfterlife(req, res) {
-  const ctx = userOf(req, res);
+  const ctx = (await userOf(req, res));
   if (!ctx) return undefined;
   const { user, meta } = ctx;
 
@@ -268,43 +294,58 @@ async function handleAfterlife(req, res) {
   const error = validateInput(mode, input);
   if (error) return sendJson(res, 400, { error });
 
+  const release = db.lockGeneration ? await db.lockGeneration(user.id) : async () => {};
+  if (!release) return sendJson(res, 409, { error: '이미 결과를 만들고 있어요. 잠시 기다려 주세요.' });
+  try {
+
   const key = chargeKey || passes.newChargeKey();
-  const existing = db.findSessionByChargeKey(key);
+  const existing = (await db.findSessionByChargeKey(key));
+  if (existing && existing.user_id !== user.id) return sendJson(res, 403, { error: '다른 사용자의 요청입니다.' });
 
   // 이미 차감이 끝난 chargeKey. 차감은 성공 뒤에만 일어나므로, 이 요청은
   // 결과를 못 받고 다시 온 것이다. 보관해 둔 결과가 있으면 그대로 돌려준다.
   // (실패해서 다시 온 요청은 차감이 없으니 여기 걸리지 않고 아래에서 새로 생성된다.)
-  if (passes.config.ticketEnabled && db.findCharge(key)) {
+  if (passes.config.ticketEnabled && (await db.findCharge(key))) {
     const saved = db.readSessionResult(existing);
     if (saved) {
-      db.audit({ userId: user.id, action: 'generation.replayed', detail: { sessionId: existing.id, chargeKey: key }, meta });
-      return sendJson(res, 200, { result: saved, pass: passes.status(user), replayed: true });
+      (await db.audit({ userId: user.id, action: 'generation.replayed', detail: { sessionId: existing.id, chargeKey: key }, meta }));
+      return sendJson(res, 200, { result: saved, pass: (await passes.status(user)), replayed: true });
     }
-    db.audit({ userId: user.id, action: 'generation.rejected', detail: { reason: 'charge_key_used', chargeKey: key }, meta });
+    (await db.audit({ userId: user.id, action: 'generation.rejected', detail: { reason: 'charge_key_used', chargeKey: key }, meta }));
     return sendJson(res, 409, { error: '이미 처리된 요청이에요. 다시 뽑기를 눌러 주세요.' });
   }
 
-  if (!passes.hasCredit(user)) {
-    db.audit({ userId: user.id, action: 'generation.rejected', detail: { reason: 'no_credit' }, meta });
+  // 환불 완료된 주문으로 남은 이용권을 쓰지 못하도록 생성 직전에 확인한다.
+  if (passes.config.iapEnabled && db.spendableOrders && user.login_id.startsWith('toss:')) {
+    try {
+      for (const order of await db.spendableOrders(user.id)) {
+        const state = await toss.getOrder({ orderId: order.order_id, userKey: user.login_id.slice(5), sku: order.sku });
+        if (state.status === 'REFUNDED') await db.revokeOrder(order.order_id);
+        else if (!['PURCHASED', 'PAYMENT_COMPLETED'].includes(state.status)) throw new Error('Order pending');
+      }
+    } catch { return sendJson(res, 503, { error: '이용권 결제 상태를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.' }); }
+  }
+  if (!(await passes.hasCredit(user))) {
+    (await db.audit({ userId: user.id, action: 'generation.rejected', detail: { reason: 'no_credit' }, meta }));
     return sendJson(res, 402, { error: '남은 이용권이 없어요. 충전 후 다시 시도해 주세요.' });
   }
 
   // 같은 chargeKey로 다시 들어온 요청은 새 세션을 만들지 않는다.
-  const session = existing || passes.startSession(user, mode, key);
+  const session = existing || (await passes.startSession(user, mode, key));
 
   // 키가 없으면 데모 결과. 이용권은 깎지 않는다.
   if (!providers.length) {
     await delay(1400);
-    db.finishSession(session.id, 'demo');
-    db.audit({ userId: user.id, action: 'generation.demo', detail: { mode, sessionId: session.id }, meta });
-    return sendJson(res, 200, { result: demoResult(mode), pass: passes.status(user) });
+    (await db.finishSession(session.id, 'demo'));
+    (await db.audit({ userId: user.id, action: 'generation.demo', detail: { mode, sessionId: session.id }, meta }));
+    return sendJson(res, 200, { result: demoResult(mode), pass: (await passes.status(user)) });
   }
 
   let lastFailure = { status: 502, message: '결과를 만들지 못했어요.' };
   for (let attempt = 1; attempt <= maxRetry; attempt += 1) {
     const logger = {
-      start: (info) => db.startGeminiRequest({ userId: user.id, sessionId: session.id, attempt, ...info }).id,
-      finish: (id, result) => db.finishGeminiRequest(id, result)
+      start: async (info) => (await db.startGeminiRequest({ userId: user.id, sessionId: session.id, attempt, ...info })).id,
+      finish: async (id, result) => (await db.finishGeminiRequest(id, result))
     };
     const { system, user: userPrompt } = buildPrompt(mode, input);
     const outcome = await generateJson(providers, { model, system, user: userPrompt, thinkingLevel, logger });
@@ -314,17 +355,18 @@ async function handleAfterlife(req, res) {
         validateResult(mode, outcome.data);
       } catch (validationError) {
         // Gemini 호출 자체는 200이었고 응답 모양이 틀린 경우. 재시도 이유를 남긴다.
-        db.audit({ userId: user.id, action: 'generation.invalid', detail: { mode, sessionId: session.id, attempt, message: validationError.message }, meta });
+        (await db.audit({ userId: user.id, action: 'generation.invalid', detail: { mode, sessionId: session.id, attempt, message: validationError.message }, meta }));
         lastFailure = { status: 502, message: validationError.message };
         if (attempt < maxRetry) { await delay(800 * 2 ** (attempt - 1)); continue; }
         break;
       }
       // 차감하기 전에 결과부터 저장한다. 차감 뒤에 죽어도 재요청으로 되찾을 수 있게.
-      if (resultRetentionDays > 0) db.saveSessionResult(session.id, outcome.data);
+      if (resultRetentionDays > 0) (await db.saveSessionResult(session.id, outcome.data));
       // 결과가 나온 뒤에만 차감한다. 실패했을 때 이용권이 날아가지 않도록.
-      const charged = passes.consume(user, { sessionId: session.id, chargeKey: key, meta });
-      db.finishSession(session.id, 'completed');
-      db.audit({ userId: user.id, action: 'generation.completed', detail: { mode, sessionId: session.id, attempt }, meta });
+      const charged = (await passes.consume(user, { sessionId: session.id, chargeKey: key, meta }));
+      if (!charged.ok) return sendJson(res, 402, { error: '남은 이용권이 없습니다.' });
+      (await db.finishSession(session.id, 'completed'));
+      (await db.audit({ userId: user.id, action: 'generation.completed', detail: { mode, sessionId: session.id, attempt }, meta }));
       return sendJson(res, 200, {
         result: outcome.data,
         pass: { ticketEnabled: charged.ticketEnabled, remaining: charged.remaining, used: charged.used }
@@ -335,9 +377,10 @@ async function handleAfterlife(req, res) {
     if (attempt < maxRetry) await delay(800 * 2 ** (attempt - 1));
   }
 
-  db.finishSession(session.id, 'failed');
-  db.audit({ userId: user.id, action: 'generation.failed', detail: { mode, sessionId: session.id, message: lastFailure.message }, meta });
+  (await db.finishSession(session.id, 'failed'));
+  (await db.audit({ userId: user.id, action: 'generation.failed', detail: { mode, sessionId: session.id, message: lastFailure.message }, meta }));
   return sendJson(res, lastFailure.status >= 400 ? lastFailure.status : 502, { error: lastFailure.message });
+  } finally { await release(); }
 }
 
 function validateInput(mode, input) {
@@ -399,7 +442,7 @@ async function sendFile(res, filePath, fallbackPath) {
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Device-Id');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Device-Id, Authorization, X-Audit-Token');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 }
 
@@ -421,33 +464,34 @@ function parseBoolean(value, fallback = false) {
 async function warnAboutConfig() {
   if (tossLoginEnabled) {
     const check = await toss.checkCredentials();
-    if (!check.ok) console.warn(`[afterlife] TOSS_LOGIN_ENABLED=true인데 mTLS 인증서를 못 읽습니다: ${check.reason}`);
-    if (!auth.config.hasSecret) console.warn('[afterlife] SESSION_SECRET이 비어 있습니다. 재시작하면 모두 다시 로그인해야 합니다.');
+    if (!check.ok) throw new Error(`mTLS 인증서 오류: ${check.reason}`);
+    if (!auth.config.hasSecret) throw new Error('토스 로그인에는 SESSION_SECRET이 필요합니다.');
   }
   if (passes.config.iapEnabled && !tossLoginEnabled) {
-    console.warn('[afterlife] TOSS_IAP_ENABLED=true인데 TOSS_LOGIN_ENABLED=false입니다. 결제는 로그인 뒤에만 됩니다.');
+    throw new Error('결제에는 토스 로그인이 필요합니다.');
   }
   if (passes.config.iapEnabled && !passes.config.ticketEnabled) {
-    console.warn('[afterlife] TOSS_IAP_ENABLED=true인데 TICKET_ENABLED=false입니다. 이용권을 사도 소모되지 않습니다.');
+    throw new Error('결제에는 이용권 차감이 필요합니다.');
   }
+  if (passes.config.iapEnabled && !process.env.TOSS_IAP_SKU?.trim()) throw new Error('결제에는 TOSS_IAP_SKU가 필요합니다.');
 }
 
 // 보관 기간이 지난 결과를 지운다. 부팅할 때 한 번, 그 뒤로는 6시간마다.
-function startResultPruner() {
+async function startResultPruner() {
   if (!(resultRetentionDays > 0)) return;
-  const prune = () => {
-    const cleared = db.pruneResults(resultRetentionDays);
+  const prune = async () => {
+    const cleared = (await db.pruneResults(resultRetentionDays));
     if (cleared) console.log(`[afterlife] 보관 기간이 지난 결과 ${cleared}건을 지웠습니다.`);
   };
-  prune();
-  setInterval(prune, 6 * 60 * 60 * 1000).unref();
+  (await prune());
+  setInterval(() => prune().catch(error => console.error('[prune]', error.message)), 6 * 60 * 60 * 1000).unref();
 }
 
-server.listen(port, host, async () => {
+await warnAboutConfig();
+await startResultPruner();
+server.listen(port, host, () => {
   const mode = providers.length ? `gemini providers: ${providers.length}` : 'demo mode (GEMINI_API_KEY 없음)';
   const authMode = tossLoginEnabled ? 'toss login' : 'device';
   const retention = resultRetentionDays > 0 ? `results: ${resultRetentionDays}d` : 'results: 저장 안 함';
   console.log(`[afterlife] http://${host}:${port} · static: ${path.relative(rootDir, staticDir)} · db: ${path.relative(rootDir, dbPath)} · auth: ${authMode} · ${retention} · ${mode}`);
-  startResultPruner();
-  await warnAboutConfig();
 });

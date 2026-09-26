@@ -10,10 +10,10 @@ export function buildProviders() {
   if (!keys.length && process.env.GEMINI_API_KEY) keys.push(process.env.GEMINI_API_KEY.trim());
   const bases = envList('GEMINI_API_BASES');
   const formats = envList('GEMINI_API_KEY_FORMATS');
-  const modelOverrides = envList('GEMINI_API_MODELS');
+  const modelOverrides = envList('GEMINI_API_KEY_MODELS').length ? envList('GEMINI_API_KEY_MODELS') : envList('GEMINI_API_MODELS');
   return keys.filter(Boolean).map((apiKey, index) => {
     const apiBase = normalizeApiBase(bases[index] || process.env.GEMINI_API_BASE || defaultApiBase);
-    const format = normalizeFormat(formats[index] || inferFormat(apiBase));
+    const format = normalizeFormat(formats[index] || process.env.GEMINI_API_KEY_FORMAT || inferFormat(apiBase));
     return {
       apiKey,
       apiBase,
@@ -32,10 +32,11 @@ export async function generateJson(providers, { model, system, user, temperature
   for (let index = 0; index < providers.length; index += 1) {
     const provider = providers[index];
     const targetModel = provider.modelOverride || model;
-    const logId = logger?.start({ keyMode: provider.keyMode, requestedModel: model, actualModel: targetModel }) ?? null;
+    const logId = await logger?.start({ keyMode: provider.keyMode, requestedModel: model, actualModel: targetModel }) ?? null;
     try {
       const res = await fetch(endpointFor(targetModel, provider), {
         method: 'POST',
+        signal: AbortSignal.timeout(Number(process.env.GEMINI_TIMEOUT_MS || 90000)),
         headers: headersFor(provider),
         body: JSON.stringify(bodyFor(targetModel, { system, user, temperature, thinkingLevel }, provider))
       });
@@ -44,7 +45,7 @@ export async function generateJson(providers, { model, system, user, temperature
         const text = await res.text();
         const message = text || `Gemini request failed (${res.status}).`;
         logFailure(provider, res.status, message);
-        logger?.finish(logId, { ok: false, status: res.status, errorMessage: message });
+        await logger?.finish(logId, { ok: false, status: res.status, errorMessage: message });
         // 응답 본문을 그대로 화면에 띄우지 않고 사람이 읽을 문장만 뽑는다.
         lastFailure = { status: res.status, message: shortMessage(message) };
         if (shouldRetry(res.status, message, index, providers.length)) continue;
@@ -59,14 +60,14 @@ export async function generateJson(providers, { model, system, user, temperature
       const text = extractText(data, provider);
       if (!text) throw new Error('Gemini 응답이 비어 있습니다.');
       const parsed = parseJsonText(text);
-      logger?.finish(logId, { ok: true, status: res.status });
+      await logger?.finish(logId, { ok: true, status: res.status });
       return { ok: true, data: parsed, keyMode: provider.keyMode, model: targetModel };
     } catch (error) {
       const message = error instanceof SyntaxError
         ? 'Gemini 응답을 JSON으로 해석하지 못했습니다.'
         : error.message || 'Gemini 요청 중 오류가 발생했습니다.';
       logFailure(provider, 502, message);
-      logger?.finish(logId, { ok: false, status: 502, errorMessage: message });
+      await logger?.finish(logId, { ok: false, status: 502, errorMessage: message });
       lastFailure = { status: 502, message };
       if (index < providers.length - 1) continue;
       return { ok: false, ...lastFailure };
@@ -92,6 +93,7 @@ function envList(name) {
 
 function inferFormat(apiBase) {
   if (apiBase.includes('monorouter/v1')) return 'monorouter';
+  if (apiBase.includes('llm-router.cafe24.com')) return 'openai';
   if (apiBase.endsWith('/chat/completions') || apiBase.endsWith('/v1') || apiBase.includes('/api/v1')) return 'openai';
   return 'gemini';
 }
@@ -107,7 +109,7 @@ function endpointFor(model, provider) {
   const encodedModel = encodeURIComponent(model);
   if (provider.format === 'openai') {
     if (provider.apiBase.endsWith('/chat/completions')) return provider.apiBase;
-    return `${provider.apiBase}/chat/completions`;
+    return provider.apiBase.endsWith('/v1') ? `${provider.apiBase}/chat/completions` : `${provider.apiBase}/api/v1/chat/completions`;
   }
   if (provider.format === 'monorouter') {
     return `${provider.apiBase}/v1beta/models/${encodedModel}:generateContent`;
@@ -115,6 +117,8 @@ function endpointFor(model, provider) {
   if (provider.apiBase.includes('{model}')) {
     return provider.apiBase.replace('{model}', encodedModel);
   }
+  if (provider.apiBase.endsWith(':generateContent')) return provider.apiBase;
+  if (/\/v1(beta)?$/.test(provider.apiBase)) return `${provider.apiBase}/models/${encodedModel}:generateContent`;
   return `${provider.apiBase}/v1beta/models/${encodedModel}:generateContent`;
 }
 

@@ -401,6 +401,7 @@ async function onLogin() {
     applyPass(data);
     renderAccess();
     toast("로그인했어요.");
+    await recoverPurchases();
   } catch (e) {
     toast(`로그인 실패: ${e.message || "원인 불명"}`);
   } finally {
@@ -408,11 +409,27 @@ async function onLogin() {
   }
 }
 
-// 콘솔에 SKU를 지정하지 않았으면 이용권 횟수가 이름에 든 소모성 상품을 고른다.
+// 서버에서 검증하는 상품과 같은 SKU만 구매한다.
 function pickPassProduct(products = []) {
-  if (TOSS_IAP_SKU) return products.find((p) => p.sku === TOSS_IAP_SKU) || { sku: TOSS_IAP_SKU };
-  const label = (p) => `${p.displayName || ""} ${p.description || ""}`;
-  return products.find((p) => label(p).includes(`${APP_CONFIG.passCredits}회`)) || products[0] || null;
+  const sku = APP_CONFIG.iapSku || TOSS_IAP_SKU;
+  return products.find((p) => p.sku === sku) || null;
+}
+
+async function recoverPurchases() {
+  if (!AUTH_TOKEN || !APP_CONFIG.iapEnabled) return;
+  const sdk = await tossSdk();
+  if (!sdk?.IAP?.getPendingOrders?.isSupported?.() || !sdk.IAP.completeProductGrant?.isSupported?.()) return;
+  try {
+    const { orders = [] } = await sdk.IAP.getPendingOrders();
+    for (const order of orders) {
+      if (order.sku !== (APP_CONFIG.iapSku || TOSS_IAP_SKU)) continue;
+      try {
+        applyPass(await apiFetch('/iap/grant-pass', { method: 'POST', body: JSON.stringify({ orderId: order.orderId }) }));
+        await sdk.IAP.completeProductGrant({ params: { orderId: order.orderId } });
+      } catch { toast('지급하지 못한 주문이 있어요. 잠시 후 다시 접속해 주세요.'); }
+    }
+    renderAccess();
+  } catch { /* 앱 외부에서는 복구 API를 호출할 수 없다. */ }
 }
 
 async function onBuy() {
@@ -616,6 +633,7 @@ async function run(mode, input, isReroll) {
     return true;
   } catch (e) {
     console.error(e);
+    reportClientError(e, 'generation', mode);
     show(isReroll ? "screen-result" : "screen-form");
     toast(e.message || "결과를 만들지 못했어요.");
     refreshPasses();
@@ -699,6 +717,7 @@ async function boot() {
     applyTitle(APP_CONFIG.title);
     renderForm();
     await restoreLogin();
+    await recoverPurchases();
     await refreshPasses();
     renderAccess();
   } catch (e) {
@@ -709,3 +728,16 @@ async function boot() {
 }
 
 boot();
+
+// Error telemetry is best-effort and only sent for an authenticated user.
+let lastClientErrorAt = 0;
+function reportClientError(error, phase = 'unknown', reportMode = '') {
+  if (!savedToken() || Date.now() - lastClientErrorAt < 5000) return;
+  lastClientErrorAt = Date.now();
+  void apiFetch('/audit/client-error', { method: 'POST', body: JSON.stringify({
+    kind: 'client_error', name: String(error?.name || 'Error').slice(0, 80),
+    message: String(error?.message || 'Unknown error').slice(0, 600), phase, reportMode,
+  }) }).catch(() => {});
+}
+window.addEventListener('error', event => reportClientError(event.error, 'window'));
+window.addEventListener('unhandledrejection', event => reportClientError(event.reason, 'unhandledrejection'));
