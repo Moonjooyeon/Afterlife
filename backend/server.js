@@ -1,4 +1,5 @@
 import './env.js';
+import { hasAuditAccess, auditLimit, clientErrorDetail, publicAuditRow } from './audit.js';
 
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -55,6 +56,20 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/questions.json') {
       return await sendFile(res, path.join(dataDir, 'questions.json'));
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/v1/audit/recent') {
+      if (!hasAuditAccess(req)) return sendJson(res, 403, { error: '감사로그 접근 권한이 없습니다.' });
+      const rows = await db.listAuditLogs(auditLimit(url.searchParams.get('limit')));
+      return sendJson(res, 200, { logs: rows.map(publicAuditRow) });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/v1/audit/client-error') {
+      if (!auth.bearerOf(req)) return sendJson(res, 401, { error: '토스 로그인이 필요합니다.' });
+      const ctx = await userOf(req, res);
+      if (!ctx) return;
+      const detail = clientErrorDetail(await readJson(req));
+      await db.audit({ userId: ctx.user.id, action: 'client_report_error', detail, meta: ctx.meta });
+      return send(res, 204, '');
     }
 
     if (req.method === 'GET' && url.pathname === '/api/v1/health') {
@@ -427,7 +442,7 @@ async function sendFile(res, filePath, fallbackPath) {
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Device-Id, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Device-Id, Authorization, X-Audit-Token');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 }
 

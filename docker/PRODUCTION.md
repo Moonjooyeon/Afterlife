@@ -52,3 +52,17 @@ The browser cannot complete Toss login or purchases outside the Toss app. Build
 the .ait bundle with VITE_API_BASE_URL=https://afterlife.ashwoodfriends.com and
 test with a real Toss account. A successful TLS probe with an invalid access token
 verifies transport only; it is not an end-to-end login or payment test.
+
+## Audit operations
+
+Set a random `AUDIT_LOG_TOKEN` in the server `.env` (never in frontend/VITE
+variables). `GET /api/v1/audit/recent?limit=100` accepts `x-audit-token` or
+`Authorization: Bearer` with this operator token; missing/invalid tokens return
+403. The limit is an integer clamped to 1–500. Responses include event/user
+identity, metadata and timestamp, but omit IP/User-Agent hashes.
+
+`POST /api/v1/audit/client-error` requires an authenticated user session and
+records `client_report_error`. Only bounded kind/name/message/phase/reportMode
+fields are stored; known credential patterns are redacted. The frontend reports
+generation failures and uncaught errors best-effort, at most once per 5 seconds.
+Telemetry failures do not interfere with the user flow.

@@ -94,3 +94,5 @@ export const finishGeminiRequest = (id,{ok,status=null,errorMessage=null}) => qu
 export const hashValue = value => value ? crypto.createHash('sha256').update(`${auditSalt}:${value}`).digest('hex').slice(0,32) : null;
 export const requestMeta = req => ({ip:String(req.headers['x-forwarded-for']||'').split(',')[0].trim()||req.socket?.remoteAddress||'',userAgent:String(req.headers['user-agent']||'')});
 export const audit = ({userId=null,action,detail={},meta={}}) => query('INSERT INTO audit_logs(user_id,action,detail,ip_hash,user_agent_hash,created_at) VALUES($1,$2,$3,$4,$5,$6)',[userId,action,JSON.stringify(detail).slice(0,2000),hashValue(meta.ip),hashValue(meta.userAgent),nowIso()]);
+
+export async function listAuditLogs(limit) { return (await query('SELECT a.*, u.login_id, u.display_name FROM audit_logs a LEFT JOIN app_users u ON u.id=a.user_id ORDER BY a.created_at DESC, a.id DESC LIMIT $1',[limit])).rows; }

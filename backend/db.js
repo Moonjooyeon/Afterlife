@@ -407,3 +407,5 @@ function migrateStoreJson(runtimeDir) {
   audit({ action: 'store.migrated', detail: { devices } });
   console.log(`[db] store.json에서 기기 ${devices}개를 옮겼습니다. 원본은 store.json.migrated로 남깁니다.`);
 }
+
+export async function listAuditLogs(limit) { return db.prepare('SELECT a.*, u.login_id, u.display_name FROM audit_logs a LEFT JOIN app_users u ON u.id=a.user_id ORDER BY a.created_at DESC, a.id DESC LIMIT ?').all(limit); }

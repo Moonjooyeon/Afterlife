@@ -633,6 +633,7 @@ async function run(mode, input, isReroll) {
     return true;
   } catch (e) {
     console.error(e);
+    reportClientError(e, 'generation', mode);
     show(isReroll ? "screen-result" : "screen-form");
     toast(e.message || "결과를 만들지 못했어요.");
     refreshPasses();
@@ -727,3 +728,16 @@ async function boot() {
 }
 
 boot();
+
+// Error telemetry is best-effort and only sent for an authenticated user.
+let lastClientErrorAt = 0;
+function reportClientError(error, phase = 'unknown', reportMode = '') {
+  if (!savedToken() || Date.now() - lastClientErrorAt < 5000) return;
+  lastClientErrorAt = Date.now();
+  void apiFetch('/audit/client-error', { method: 'POST', body: JSON.stringify({
+    kind: 'client_error', name: String(error?.name || 'Error').slice(0, 80),
+    message: String(error?.message || 'Unknown error').slice(0, 600), phase, reportMode,
+  }) }).catch(() => {});
+}
+window.addEventListener('error', event => reportClientError(event.error, 'window'));
+window.addEventListener('unhandledrejection', event => reportClientError(event.reason, 'unhandledrejection'));
