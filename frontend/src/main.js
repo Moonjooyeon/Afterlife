@@ -2,8 +2,10 @@
    Afterlife 프론트엔드
    - 화면, 문진 렌더링, 결과 렌더링, 이미지 저장만 담당한다.
    - 프롬프트와 Gemini API 키는 백엔드(backend/)에 있다.
-   - 문진 항목은 백엔드가 주는 /questions.json에서 읽는다.
+   - 문진 항목은 앱 번들에 포함한다.
    ============================================================ */
+import questions from '../../data/questions.json';
+
 const API_BASE_URL = String(envValue("VITE_API_BASE_URL")).replace(/\/+$/, "");
 const DEVICE_ID_STORAGE = "afterlife_device_id";
 const AUTH_TOKEN_STORAGE = "afterlife_auth_token";
@@ -16,7 +18,6 @@ function envValue(key) {
 }
 
 const apiPath = (p) => `${API_BASE_URL}/api/v1${p}`;
-const publicPath = (p) => `${API_BASE_URL}${p}`;
 
 // 이용권을 붙일 기기 식별자. 로그인을 붙이면 이 자리를 세션 토큰으로 바꾸면 된다.
 function deviceId() {
@@ -68,10 +69,12 @@ function tossSdk() {
 
 const makeChargeKey = () => `AL-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
-/* ---------------- 문진 (백엔드 /questions.json) ---------------- */
-let AI_PICK = "캐해석에 맡김";
-let PAIR_Q = [];
-let SOLO_Q = [];
+/* ---------------- 문진 (앱에 포함된 공통 데이터) ---------------- */
+const AI_PICK = questions.aiPick;
+const PAIR_Q = questions.pair;
+const SOLO_Q = questions.solo;
+let appReady = false;
+let bootFailed = false;
 let APP_CONFIG = { title: "읽지 않음", demoMode: true, ticketEnabled: false, loginEnabled: false, iapEnabled: false, passCredits: 0, passPriceKrw: 0 };
 let PASS = { ticketEnabled: false, remaining: null };
 let AUTH_TOKEN = savedToken();
@@ -257,6 +260,14 @@ function renderForm() {
     h("button", { type: "button", class: "btn-main", id: "btn-submit", onclick: onSubmit }, "접수하기 · 이용권 1장"),
     h("div", { class: "fine" }, "고르지 않은 문항도 캐해석에 맡겨져요."),
   ));
+  updateSubmit();
+  if (bootFailed) renderConnectionError();
+}
+
+function renderConnectionError() {
+  $("form-err").replaceChildren(
+    h("div", {}, "서비스에 연결하지 못했어요. 입력한 내용은 유지됩니다."),
+    h("button", { type: "button", class: "chip", onclick: boot }, "다시 연결"));
 }
 
 function clearErr() { const e = $("form-err"); if (e) e.textContent = ""; }
@@ -329,10 +340,17 @@ function passText() {
 }
 function applyPass(pass) {
   if (pass) PASS = { ticketEnabled: !!pass.ticketEnabled, remaining: pass.remaining };
-  const submit = $("btn-submit");
-  if (submit) submit.textContent = `접수하기 · ${passText()}`;
+  updateSubmit();
   const again = $("btn-again");
   if (again) again.textContent = `다시 뽑기 · ${passText()}`;
+}
+function updateSubmit() {
+  const submit = $("btn-submit");
+  if (!submit) return;
+  submit.disabled = !appReady;
+  submit.textContent = !appReady ? "연결 확인 중…"
+    : APP_CONFIG.loginEnabled && !AUTH_USER ? "토스 로그인"
+    : `접수하기 · ${passText()}`;
 }
 async function refreshPasses() {
   if (APP_CONFIG.loginEnabled && !AUTH_TOKEN) { applyPass({ ticketEnabled: true, remaining: 0 }); return; }
@@ -609,6 +627,7 @@ function toast(msg) {
 }
 
 async function run(mode, input, isReroll) {
+  if (!appReady) return false;
   if (APP_CONFIG.loginEnabled && !AUTH_TOKEN) {
     toast("토스 로그인이 필요해요.");
     return false;
@@ -642,6 +661,8 @@ async function run(mode, input, isReroll) {
 }
 
 function onSubmit() {
+  if (!appReady) return;
+  if (APP_CONFIG.loginEnabled && !AUTH_USER) { void onLogin(); return; }
   const m = state.mode, input = collectInput(m);
   const err = $("form-err");
   if (!input.deadName || !input.livingName) {
@@ -702,28 +723,29 @@ function applyTitle(title) {
 }
 
 async function boot() {
+  appReady = false;
+  bootFailed = false;
+  renderForm();
   try {
-    const [questions, config] = await Promise.all([
-      fetch(publicPath("/questions.json")).then((r) => {
-        if (!r.ok) throw new Error("문진을 불러오지 못했어요.");
-        return r.json();
-      }),
-      apiFetch("/config").catch(() => APP_CONFIG),
-    ]);
-    AI_PICK = questions.aiPick || AI_PICK;
-    PAIR_Q = questions.pair || [];
-    SOLO_Q = questions.solo || [];
+    const config = await apiFetch("/config");
+    if (typeof config.loginEnabled !== 'boolean' || typeof config.ticketEnabled !== 'boolean') {
+      throw new Error("서비스 설정을 확인하지 못했어요.");
+    }
     APP_CONFIG = { ...APP_CONFIG, ...config };
     applyTitle(APP_CONFIG.title);
     renderForm();
     await restoreLogin();
+    appReady = true;
+    updateSubmit();
     await recoverPurchases();
     await refreshPasses();
     renderAccess();
   } catch (e) {
     console.error(e);
-    $("form").replaceChildren(h("div", { class: "err", style: "padding:40px 22px" },
-      e.message || "화면을 불러오지 못했어요. 새로고침해 주세요."));
+    appReady = false;
+    bootFailed = true;
+    updateSubmit();
+    renderConnectionError();
   }
 }
 
