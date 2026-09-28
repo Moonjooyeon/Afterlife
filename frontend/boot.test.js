@@ -54,3 +54,17 @@ test('logged-out visitor gets login action before name validation or generation'
   assert.equal(a.context.loginRequested, true);
   assert.equal(a.get('form-err').textContent, '');
 });
+
+test('optional personalities are included in generation input and default to character interpretation', () => {
+  const a = app(() => new Promise(() => {}));
+  const picked = vm.runInContext(`
+    state.answers.pair.deadPersonality = { value: '무뚝뚝하지만 행동으로 챙김' };
+    state.answers.pair.livingPersonality = { value: '다정하지만 속마음을 숨김' };
+    collectInput('pair');
+  `, a.context);
+  assert.equal(picked.deadPersonality, '무뚝뚝하지만 행동으로 챙김');
+  assert.equal(picked.livingPersonality, '다정하지만 속마음을 숨김');
+  const blank = vm.runInContext(`collectInput('solo')`, a.context);
+  assert.equal(blank.deadPersonality, questions.aiPick);
+  assert.equal(blank.livingPersonality, questions.aiPick);
+});

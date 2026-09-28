@@ -221,11 +221,13 @@ function renderForm() {
         h("div", { class: "role" }, "故 떠난 사람"),
         textField(m, "deadName", "이름"),
         textField(m, "deadVoice", "상대를 부르는 호칭·말투"),
+        textField(m, "deadPersonality", "성격 (선택)"),
       ),
       h("div", { class: "person" },
         h("div", { class: "role" }, "남은 사람"),
         textField(m, "livingName", "이름"),
         textField(m, "livingVoice", "상대를 부르는 호칭·말투"),
+        textField(m, "livingPersonality", "성격 (선택)"),
       ),
     ));
   } else {
@@ -234,9 +236,10 @@ function renderForm() {
       h("div", { class: "role" }, "故"),
       textField(m, "deadName", "이름"),
       textField(m, "deadVoice", "받을 사람을 부르는 호칭·말투"),
+      textField(m, "deadPersonality", "성격 (선택)"),
     ));
   }
-  form.append(h("div", { class: "hint" }, "호칭·말투 예: 서하야, 반말 / 당신, 존댓말"));
+  form.append(h("div", { class: "hint" }, "호칭·말투 예: 서하야, 반말 / 당신, 존댓말 · 성격 예: 무뚝뚝하지만 행동으로 챙김"));
   form.append(photoInput(m));
   form.append(h("div", { class: "hint" }, "올린 이미지는 결과지 중간과 마지막 장면에 흑백으로 깔려요."));
   form.append(h("div", { class: "q" }, "세계관 연도 표기"));
@@ -326,7 +329,9 @@ function collectInput(mode) {
   }
   return {
     deadName: v("deadName"), deadVoice: v("deadVoice") || AI_PICK,
+    deadPersonality: v("deadPersonality") || AI_PICK,
     livingName: v("livingName"), livingVoice: v("livingVoice") || AI_PICK,
+    livingPersonality: v("livingPersonality") || AI_PICK,
     era: v("era") || AI_PICK, keyword: v("keyword"), story: v("story"),
     choices,
     raw: { temp: v("temp"), tempDir: a.tempDir?.value || "", relation: v("relation") },

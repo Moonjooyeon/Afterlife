@@ -46,6 +46,7 @@ const COMMON_RULES = `
 - "A → B" 표기는 A가 B에게 그 감정(집착·헌신·증오·짝사랑)을 품었다는 뜻이다. 방향을 뒤집지 않는다.
 - 선택지가 "${AI_PICK}"인 항목은 입력된 설정을 바탕으로 캐릭터를 해석해 가장 비극적으로 어울리게 정하고, 결과 전체에서 모순이 없게 한다.
 - 호칭과 말투는 처음부터 끝까지 유지한다. 연애 감정이 없는 쪽의 배려를 숨겨진 사랑의 증거로 바꾸지 않는다.
+- 입력된 성격은 설명문으로 되풀이하지 말고, 먼저 연락하는지, 감정을 감추는지, 위기에서 무엇부터 하는지 같은 선택과 행동, 문장 길이와 대답을 피하는 방식으로 드러낸다. 성격 한 줄을 고정관념처럼 과장하지 말고 관계와 상황에 따라 결이 달라지게 한다.
 - 메신저와 본문은 같은 사건을 공유한다. 등장인물이 같은 시각에 두 장소에 있거나, 버린 물건이 설명 없이 돌아오거나, 아직 모르는 사실을 먼저 말하지 않는다. 소품의 소유·이동·폐기를 추적한다.
 - 생년·나이가 입력에 없으면 years에 출생 연도를 지어내지 말고 사망 연도만 표기한다.
 - 떡밥: 키워드나 설정에서 구체적인 사물·습관 하나를 골라 앞에서 자연스럽게 깔고, 뒤에서 의미가 달라지는 순간에 회수한다. 같은 사물의 이름을 기계적으로 반복하지 않는다.
@@ -165,10 +166,10 @@ ${collapseGuide(input)}
 `;
 
   const lines = [
-    `떠난 사람(故): ${input.deadName} / ${mode === "pair" ? "상대를" : "받을 사람을"} 부르는 호칭·말투: ${input.deadVoice}`,
+    `떠난 사람(故): ${input.deadName} / 성격: ${input.deadPersonality || AI_PICK} / ${mode === "pair" ? "상대를" : "받을 사람을"} 부르는 호칭·말투: ${input.deadVoice}`,
     mode === "pair"
-      ? `남은 사람: ${input.livingName} / 호칭·말투: ${input.livingVoice}`
-      : `받을 사람: ${input.livingName} / 받을 사람이 떠난 사람을 부르는 호칭·말투: ${input.livingVoice}`,
+      ? `남은 사람: ${input.livingName} / 성격: ${input.livingPersonality || AI_PICK} / 호칭·말투: ${input.livingVoice}`
+      : `받을 사람: ${input.livingName} / 성격: ${input.livingPersonality || AI_PICK} / 받을 사람이 떠난 사람을 부르는 호칭·말투: ${input.livingVoice}`,
     `세계관 연도 표기: ${input.era}`,
     ...Object.entries(input.choices || {}).map(([k, v]) => `${k}: ${v}`),
     `키워드: ${input.keyword || "없음"}`,

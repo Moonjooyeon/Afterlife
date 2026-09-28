@@ -128,8 +128,10 @@ Apps in Toss `IAP.createOneTimePurchaseOrder()`의 `processProductGrant`에서 �
   "input": {
     "deadName": "서하",
     "deadVoice": "도현아, 반말",
+    "deadPersonality": "무뚝뚝하지만 행동으로 챙김",
     "livingName": "도현",
     "livingVoice": "당신, 존댓말",
+    "livingPersonality": "다정하지만 속마음을 잘 숨김",
     "era": "724년",
     "keyword": "귤",
     "story": "",
