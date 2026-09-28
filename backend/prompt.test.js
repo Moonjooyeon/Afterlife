@@ -20,4 +20,7 @@ test('generation prompt includes both character personalities and behavior guida
   assert.match(user, /현재의 공간적 매개체: 주인이 사라진 방/);
   assert.match(system, /선택과 행동, 문장 길이와 대답을 피하는 방식으로 드러낸다/);
   assert.match(system, /성격 붕괴\(OOC\) 방어 및 입체적 붕괴/);
+  assert.match(system, /2~4줄, 전체 45~120자의 짧은 독백/);
+  assert.match(system, /여러 사건·유품·약속을 목록처럼 요약하지 않는다/);
+  assert.match(system, /장소나 계절을 임의로 덧붙이지 않는다/);
 });
