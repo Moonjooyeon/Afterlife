@@ -2,9 +2,12 @@
    Afterlife 프론트엔드
    - 화면, 문진 렌더링, 결과 렌더링, 이미지 저장만 담당한다.
    - 프롬프트와 Gemini API 키는 백엔드(backend/)에 있다.
-   - 문진 항목은 백엔드가 주는 /questions.json에서 읽는다.
+   - 문진 항목은 앱 번들에 포함한다.
    ============================================================ */
+import questions from '../../data/questions.json';
+
 const API_BASE_URL = String(envValue("VITE_API_BASE_URL")).replace(/\/+$/, "");
+const API_ROOT = API_BASE_URL.endsWith("/api/v1") ? API_BASE_URL : `${API_BASE_URL}/api/v1`;
 const DEVICE_ID_STORAGE = "afterlife_device_id";
 const AUTH_TOKEN_STORAGE = "afterlife_auth_token";
 // 토스 콘솔에서 받은 상품 SKU. 비워두면 상품 목록에서 이용권 상품을 찾아 쓴다.
@@ -15,8 +18,7 @@ function envValue(key) {
   try { return import.meta.env?.[key] || ""; } catch { return ""; }
 }
 
-const apiPath = (p) => `${API_BASE_URL}/api/v1${p}`;
-const publicPath = (p) => `${API_BASE_URL}${p}`;
+const apiPath = (p) => `${API_ROOT}${p}`;
 
 // 이용권을 붙일 기기 식별자. 로그인을 붙이면 이 자리를 세션 토큰으로 바꾸면 된다.
 function deviceId() {
@@ -68,10 +70,12 @@ function tossSdk() {
 
 const makeChargeKey = () => `AL-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
-/* ---------------- 문진 (백엔드 /questions.json) ---------------- */
-let AI_PICK = "캐해석에 맡김";
-let PAIR_Q = [];
-let SOLO_Q = [];
+/* ---------------- 문진 (앱에 포함된 공통 데이터) ---------------- */
+const AI_PICK = questions.aiPick;
+const PAIR_Q = questions.pair;
+const SOLO_Q = questions.solo;
+let appReady = false;
+let bootFailed = false;
 let APP_CONFIG = { title: "읽지 않음", demoMode: true, ticketEnabled: false, loginEnabled: false, iapEnabled: false, passCredits: 0, passPriceKrw: 0 };
 let PASS = { ticketEnabled: false, remaining: null };
 let AUTH_TOKEN = savedToken();
@@ -218,11 +222,13 @@ function renderForm() {
         h("div", { class: "role" }, "故 떠난 사람"),
         textField(m, "deadName", "이름"),
         textField(m, "deadVoice", "상대를 부르는 호칭·말투"),
+        textField(m, "deadPersonality", "성격 (선택)"),
       ),
       h("div", { class: "person" },
         h("div", { class: "role" }, "남은 사람"),
         textField(m, "livingName", "이름"),
         textField(m, "livingVoice", "상대를 부르는 호칭·말투"),
+        textField(m, "livingPersonality", "성격 (선택)"),
       ),
     ));
   } else {
@@ -231,9 +237,25 @@ function renderForm() {
       h("div", { class: "role" }, "故"),
       textField(m, "deadName", "이름"),
       textField(m, "deadVoice", "받을 사람을 부르는 호칭·말투"),
+      textField(m, "deadPersonality", "성격 (선택)"),
     ));
   }
-  form.append(h("div", { class: "hint" }, "호칭·말투 예: 서하야, 반말 / 당신, 존댓말"));
+  form.append(h("div", { class: "hint" }, "호칭·말투 예: 서하야, 반말 / 당신, 존댓말 · 성격 예: 무뚝뚝하지만 행동으로 챙김"));
+  form.append(h("details", { class: "character-detail" },
+    h("summary", {}, "캐릭터 디테일 더하기 (선택)"),
+    h("div", { class: "q" }, "떠난 사람이 상대를 대했던 태도"),
+    textField(m, "deadAttitude", "틱틱대지만 뒤에서 챙김"),
+    h("div", { class: "q" }, "남기고 간 상흔·물건"),
+    textField(m, "heirloom", "쓰던 머그잔, 끝내 보내지 못한 편지"),
+    h("div", { class: "q" }, "남은 사람이 상실을 억누르는 방식"),
+    textField(m, "livingCoping", "평소처럼 2인분의 식사를 차림"),
+    h("div", { class: "q" }, "떠난 사람에게서 전염된 습관"),
+    textField(m, "inheritedHabit", "긴장하면 소매 끝을 접는 버릇"),
+    h("div", { class: "q" }, "감정이 무너지는 트리거"),
+    textField(m, "breakTrigger", "무심코 상대 몫까지 주문한 순간"),
+    h("div", { class: "q" }, "현재 장면의 공간·매개체"),
+    textField(m, "sceneAnchor", "비 오는 묘지, 주인이 사라진 방"),
+  ));
   form.append(photoInput(m));
   form.append(h("div", { class: "hint" }, "올린 이미지는 결과지 중간과 마지막 장면에 흑백으로 깔려요."));
   form.append(h("div", { class: "q" }, "세계관 연도 표기"));
@@ -257,6 +279,14 @@ function renderForm() {
     h("button", { type: "button", class: "btn-main", id: "btn-submit", onclick: onSubmit }, "접수하기 · 이용권 1장"),
     h("div", { class: "fine" }, "고르지 않은 문항도 캐해석에 맡겨져요."),
   ));
+  updateSubmit();
+  if (bootFailed) renderConnectionError();
+}
+
+function renderConnectionError() {
+  $("form-err").replaceChildren(
+    h("div", {}, "서비스에 연결하지 못했어요. 입력한 내용은 유지됩니다."),
+    h("button", { type: "button", class: "chip", onclick: boot }, "다시 연결"));
 }
 
 function clearErr() { const e = $("form-err"); if (e) e.textContent = ""; }
@@ -315,7 +345,15 @@ function collectInput(mode) {
   }
   return {
     deadName: v("deadName"), deadVoice: v("deadVoice") || AI_PICK,
+    deadPersonality: v("deadPersonality") || AI_PICK,
     livingName: v("livingName"), livingVoice: v("livingVoice") || AI_PICK,
+    livingPersonality: v("livingPersonality") || AI_PICK,
+    deadAttitude: v("deadAttitude") || AI_PICK,
+    heirloom: v("heirloom") || AI_PICK,
+    livingCoping: v("livingCoping") || AI_PICK,
+    inheritedHabit: v("inheritedHabit") || AI_PICK,
+    breakTrigger: v("breakTrigger") || AI_PICK,
+    sceneAnchor: v("sceneAnchor") || AI_PICK,
     era: v("era") || AI_PICK, keyword: v("keyword"), story: v("story"),
     choices,
     raw: { temp: v("temp"), tempDir: a.tempDir?.value || "", relation: v("relation") },
@@ -329,10 +367,17 @@ function passText() {
 }
 function applyPass(pass) {
   if (pass) PASS = { ticketEnabled: !!pass.ticketEnabled, remaining: pass.remaining };
-  const submit = $("btn-submit");
-  if (submit) submit.textContent = `접수하기 · ${passText()}`;
+  updateSubmit();
   const again = $("btn-again");
   if (again) again.textContent = `다시 뽑기 · ${passText()}`;
+}
+function updateSubmit() {
+  const submit = $("btn-submit");
+  if (!submit) return;
+  submit.disabled = !appReady;
+  submit.textContent = !appReady ? "연결 확인 중…"
+    : APP_CONFIG.loginEnabled && !AUTH_USER ? "토스 로그인"
+    : `접수하기 · ${passText()}`;
 }
 async function refreshPasses() {
   if (APP_CONFIG.loginEnabled && !AUTH_TOKEN) { applyPass({ ticketEnabled: true, remaining: 0 }); return; }
@@ -401,6 +446,7 @@ async function onLogin() {
     applyPass(data);
     renderAccess();
     toast("로그인했어요.");
+    await recoverPurchases();
   } catch (e) {
     toast(`로그인 실패: ${e.message || "원인 불명"}`);
   } finally {
@@ -408,11 +454,27 @@ async function onLogin() {
   }
 }
 
-// 콘솔에 SKU를 지정하지 않았으면 이용권 횟수가 이름에 든 소모성 상품을 고른다.
+// 서버에서 검증하는 상품과 같은 SKU만 구매한다.
 function pickPassProduct(products = []) {
-  if (TOSS_IAP_SKU) return products.find((p) => p.sku === TOSS_IAP_SKU) || { sku: TOSS_IAP_SKU };
-  const label = (p) => `${p.displayName || ""} ${p.description || ""}`;
-  return products.find((p) => label(p).includes(`${APP_CONFIG.passCredits}회`)) || products[0] || null;
+  const sku = APP_CONFIG.iapSku || TOSS_IAP_SKU;
+  return products.find((p) => p.sku === sku) || null;
+}
+
+async function recoverPurchases() {
+  if (!AUTH_TOKEN || !APP_CONFIG.iapEnabled) return;
+  const sdk = await tossSdk();
+  if (!sdk?.IAP?.getPendingOrders?.isSupported?.() || !sdk.IAP.completeProductGrant?.isSupported?.()) return;
+  try {
+    const { orders = [] } = await sdk.IAP.getPendingOrders();
+    for (const order of orders) {
+      if (order.sku !== (APP_CONFIG.iapSku || TOSS_IAP_SKU)) continue;
+      try {
+        applyPass(await apiFetch('/iap/grant-pass', { method: 'POST', body: JSON.stringify({ orderId: order.orderId }) }));
+        await sdk.IAP.completeProductGrant({ params: { orderId: order.orderId } });
+      } catch { toast('지급하지 못한 주문이 있어요. 잠시 후 다시 접속해 주세요.'); }
+    }
+    renderAccess();
+  } catch { /* 앱 외부에서는 복구 API를 호출할 수 없다. */ }
 }
 
 async function onBuy() {
@@ -592,6 +654,7 @@ function toast(msg) {
 }
 
 async function run(mode, input, isReroll) {
+  if (!appReady) return false;
   if (APP_CONFIG.loginEnabled && !AUTH_TOKEN) {
     toast("토스 로그인이 필요해요.");
     return false;
@@ -616,6 +679,7 @@ async function run(mode, input, isReroll) {
     return true;
   } catch (e) {
     console.error(e);
+    reportClientError(e, 'generation', mode);
     show(isReroll ? "screen-result" : "screen-form");
     toast(e.message || "결과를 만들지 못했어요.");
     refreshPasses();
@@ -624,6 +688,8 @@ async function run(mode, input, isReroll) {
 }
 
 function onSubmit() {
+  if (!appReady) return;
+  if (APP_CONFIG.loginEnabled && !AUTH_USER) { void onLogin(); return; }
   const m = state.mode, input = collectInput(m);
   const err = $("form-err");
   if (!input.deadName || !input.livingName) {
@@ -684,28 +750,43 @@ function applyTitle(title) {
 }
 
 async function boot() {
+  appReady = false;
+  bootFailed = false;
+  renderForm();
   try {
-    const [questions, config] = await Promise.all([
-      fetch(publicPath("/questions.json")).then((r) => {
-        if (!r.ok) throw new Error("문진을 불러오지 못했어요.");
-        return r.json();
-      }),
-      apiFetch("/config").catch(() => APP_CONFIG),
-    ]);
-    AI_PICK = questions.aiPick || AI_PICK;
-    PAIR_Q = questions.pair || [];
-    SOLO_Q = questions.solo || [];
+    const config = await apiFetch("/config");
+    if (typeof config.loginEnabled !== 'boolean' || typeof config.ticketEnabled !== 'boolean') {
+      throw new Error("서비스 설정을 확인하지 못했어요.");
+    }
     APP_CONFIG = { ...APP_CONFIG, ...config };
     applyTitle(APP_CONFIG.title);
     renderForm();
     await restoreLogin();
+    appReady = true;
+    updateSubmit();
+    await recoverPurchases();
     await refreshPasses();
     renderAccess();
   } catch (e) {
     console.error(e);
-    $("form").replaceChildren(h("div", { class: "err", style: "padding:40px 22px" },
-      e.message || "화면을 불러오지 못했어요. 새로고침해 주세요."));
+    appReady = false;
+    bootFailed = true;
+    updateSubmit();
+    renderConnectionError();
   }
 }
 
 boot();
+
+// Error telemetry is best-effort and only sent for an authenticated user.
+let lastClientErrorAt = 0;
+function reportClientError(error, phase = 'unknown', reportMode = '') {
+  if (!savedToken() || Date.now() - lastClientErrorAt < 5000) return;
+  lastClientErrorAt = Date.now();
+  void apiFetch('/audit/client-error', { method: 'POST', body: JSON.stringify({
+    kind: 'client_error', name: String(error?.name || 'Error').slice(0, 80),
+    message: String(error?.message || 'Unknown error').slice(0, 600), phase, reportMode,
+  }) }).catch(() => {});
+}
+window.addEventListener('error', event => reportClientError(event.error, 'window'));
+window.addEventListener('unhandledrejection', event => reportClientError(event.reason, 'unhandledrejection'));
