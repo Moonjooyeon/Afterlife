@@ -241,6 +241,21 @@ function renderForm() {
     ));
   }
   form.append(h("div", { class: "hint" }, "호칭·말투 예: 서하야, 반말 / 당신, 존댓말 · 성격 예: 무뚝뚝하지만 행동으로 챙김"));
+  form.append(h("details", { class: "character-detail" },
+    h("summary", {}, "캐릭터 디테일 더하기 (선택)"),
+    h("div", { class: "q" }, "떠난 사람이 상대를 대했던 태도"),
+    textField(m, "deadAttitude", "틱틱대지만 뒤에서 챙김"),
+    h("div", { class: "q" }, "남기고 간 상흔·물건"),
+    textField(m, "heirloom", "쓰던 머그잔, 끝내 보내지 못한 편지"),
+    h("div", { class: "q" }, "남은 사람이 상실을 억누르는 방식"),
+    textField(m, "livingCoping", "평소처럼 2인분의 식사를 차림"),
+    h("div", { class: "q" }, "떠난 사람에게서 전염된 습관"),
+    textField(m, "inheritedHabit", "긴장하면 소매 끝을 접는 버릇"),
+    h("div", { class: "q" }, "감정이 무너지는 트리거"),
+    textField(m, "breakTrigger", "무심코 상대 몫까지 주문한 순간"),
+    h("div", { class: "q" }, "현재 장면의 공간·매개체"),
+    textField(m, "sceneAnchor", "비 오는 묘지, 주인이 사라진 방"),
+  ));
   form.append(photoInput(m));
   form.append(h("div", { class: "hint" }, "올린 이미지는 결과지 중간과 마지막 장면에 흑백으로 깔려요."));
   form.append(h("div", { class: "q" }, "세계관 연도 표기"));
@@ -333,6 +348,12 @@ function collectInput(mode) {
     deadPersonality: v("deadPersonality") || AI_PICK,
     livingName: v("livingName"), livingVoice: v("livingVoice") || AI_PICK,
     livingPersonality: v("livingPersonality") || AI_PICK,
+    deadAttitude: v("deadAttitude") || AI_PICK,
+    heirloom: v("heirloom") || AI_PICK,
+    livingCoping: v("livingCoping") || AI_PICK,
+    inheritedHabit: v("inheritedHabit") || AI_PICK,
+    breakTrigger: v("breakTrigger") || AI_PICK,
+    sceneAnchor: v("sceneAnchor") || AI_PICK,
     era: v("era") || AI_PICK, keyword: v("keyword"), story: v("story"),
     choices,
     raw: { temp: v("temp"), tempDir: a.tempDir?.value || "", relation: v("relation") },
