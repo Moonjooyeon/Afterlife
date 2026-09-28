@@ -7,6 +7,7 @@
 import questions from '../../data/questions.json';
 
 const API_BASE_URL = String(envValue("VITE_API_BASE_URL")).replace(/\/+$/, "");
+const API_ROOT = API_BASE_URL.endsWith("/api/v1") ? API_BASE_URL : `${API_BASE_URL}/api/v1`;
 const DEVICE_ID_STORAGE = "afterlife_device_id";
 const AUTH_TOKEN_STORAGE = "afterlife_auth_token";
 // 토스 콘솔에서 받은 상품 SKU. 비워두면 상품 목록에서 이용권 상품을 찾아 쓴다.
@@ -17,7 +18,7 @@ function envValue(key) {
   try { return import.meta.env?.[key] || ""; } catch { return ""; }
 }
 
-const apiPath = (p) => `${API_BASE_URL}/api/v1${p}`;
+const apiPath = (p) => `${API_ROOT}${p}`;
 
 // 이용권을 붙일 기기 식별자. 로그인을 붙이면 이 자리를 세션 토큰으로 바꾸면 된다.
 function deviceId() {
